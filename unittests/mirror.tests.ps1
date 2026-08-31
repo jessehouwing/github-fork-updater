@@ -180,6 +180,13 @@ Describe "ResolveUpstream" {
         ResolveUpstream -repo $repo -syncSettings (GetSyncSettings -properties @{}) | Should -Be "actions/checkout"
     }
 
+    It "cannot resolve a fork that was loaded without its parent" {
+        # the repository list endpoints omit the parent, callers have to reload the fork in full first
+        $repo = [PSCustomObject]@{ name = "trufflehog"; full_name = "jessehouwing/trufflehog"; fork = $true }
+
+        ResolveUpstream -repo $repo -syncSettings (GetSyncSettings -properties @{}) -WarningAction SilentlyContinue | Should -BeNullOrEmpty
+    }
+
     It "splits the naming convention on the first underscore only" {
         $repo = [PSCustomObject]@{ name = "actions_setup_node"; full_name = "mirrors/actions_setup_node" }
 

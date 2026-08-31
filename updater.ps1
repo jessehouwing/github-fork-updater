@@ -33,6 +33,14 @@ function GetUpstreamState {
         [object] $syncSettings
     )
 
+    # the repository list endpoints return a minimal representation that omits the parent, so reload the fork in full
+    if ($repo.fork -and $null -eq $repo.parent) {
+        $full = GetRepoInfo -gitHubHost $targetHost -repoFullName $repo.full_name
+        if ($null -ne $full) {
+            $repo = $full
+        }
+    }
+
     $upstream = ResolveUpstream -repo $repo -syncSettings $syncSettings
     if ($null -eq $upstream) {
         return $null
