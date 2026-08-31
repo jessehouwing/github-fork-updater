@@ -1,0 +1,153 @@
+name: Resolve tokens
+description: Resolves the API urls for the target host and mints the tokens used to read from public GitHub and write to the target host
+
+inputs:
+  target-server-url:
+    description: The host that holds the repositories to update. Defaults to the server the workflow runs on
+    required: false
+    default: ''
+  source-token-required:
+    description: Set to false when the caller never talks to public GitHub
+    required: false
+    default: 'true'
+
+  use-github-app:
+    description: Set to true to mint the target token from a GitHub App
+    required: false
+    default: 'false'
+  app-id:
+    description: Client or app id of the GitHub App on the target host
+    required: false
+    default: ''
+  private-key:
+    description: Private key of the GitHub App on the target host
+    required: false
+    default: ''
+  target-org:
+    description: The organization the target GitHub App is installed on
+    required: false
+    default: ''
+  pat:
+    description: Fallback token for the target host
+    required: false
+    default: ''
+
+  use-public-github-app:
+    description: Set to true to mint the public GitHub token from a separate GitHub App
+    required: false
+    default: 'false'
+  public-app-id:
+    description: Client or app id of the GitHub App on public GitHub
+    required: false
+    default: ''
+  public-private-key:
+    description: Private key of the GitHub App on public GitHub
+    required: false
+    default: ''
+  public-org:
+    description: The organization the public GitHub App is installed on
+    required: false
+    default: ''
+  public-pat:
+    description: Fallback token for public GitHub
+    required: false
+    default: ''
+
+outputs:
+  target-token:
+    description: Token with write access on the target host
+    value: ${{ steps.tokens.outputs.target-token }}
+  source-token:
+    description: Token with read access on public GitHub
+    value: ${{ steps.tokens.outputs.source-token }}
+  target-server-url:
+    description: The normalized server url of the target host
+    value: ${{ steps.urls.outputs.target-server-url }}
+  target-api-url:
+    description: The API url derived from the target server url
+    value: ${{ steps.urls.outputs.target-api-url }}
+  source-is-target:
+    description: Whether the target host is public GitHub, so both sides can share one token
+    value: ${{ steps.urls.outputs.source-is-target }}
+
+runs:
+  using: composite
+  steps:
+  - id: urls
+    shell: pwsh
+    env:
+      TARGET_SERVER_URL: ${{ inputs.target-server-url }}
+    run: |
+      # reuse the same derivation the scripts use so there is a single source of truth
+      . "$env:GITHUB_WORKSPACE/github-host.ps1"
+
+      $serverUrl = if ([string]::IsNullOrWhiteSpace($env:TARGET_SERVER_URL)) { $env:GITHUB_SERVER_URL } else { $env:TARGET_SERVER_URL }
+      $urls = ResolveGitHubHostUrls -serverUrl $serverUrl
+
+      "target-api-url=$($urls.ApiUrl)" >> $env:GITHUB_OUTPUT
+      "target-server-url=$($urls.ServerUrl)" >> $env:GITHUB_OUTPUT
+      # when the target already is public GitHub there is no second host to authenticate against
+      "source-is-target=$($urls.IsPublicGitHub.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+  - uses: actions/create-github-app-token@v3.2.0 # v3.2.0
+    name: Get token from the GitHub App on the target host
+    if: ${{ inputs.use-github-app == 'true' }}
+    id: target-app-token
+    with:
+      app-id: ${{ inputs.app-id }}
+      private-key: ${{ inputs.private-key }}
+      # without an owner the token is scoped to this repository only, but the updater works on other repositories
+      owner: ${{ inputs.target-org }}
+      github-api-url: ${{ steps.urls.outputs.target-api-url }}
+
+  - uses: actions/create-github-app-token@v3.2.0
+    name: Get token from the GitHub App on public GitHub
+    if: ${{ inputs.use-public-github-app == 'true' && inputs.source-token-required == 'true' && steps.urls.outputs.source-is-target == 'false' }}
+    id: public-app-token
+    with:
+      app-id: ${{ inputs.public-app-id }}
+      private-key: ${{ inputs.public-private-key }}
+      owner: ${{ inputs.public-org }}
+      github-api-url: https://api.github.com
+
+  - id: tokens
+    name: Determine tokens to use
+    shell: bash
+    env:
+      target_app_token: ${{ steps.target-app-token.outputs.token }}
+      source_app_token: ${{ steps.public-app-token.outputs.token }}
+      source_is_target: ${{ steps.urls.outputs.source-is-target }}
+      source_required: ${{ inputs.source-token-required }}
+      pat: ${{ inputs.pat }}
+      public_pat: ${{ inputs.public-pat }}
+    run: |
+      if [ -n "$target_app_token" ]; then
+        target_token="$target_app_token"
+        echo "Using the GitHub App token for the target host"
+      else
+        target_token="$pat"
+        echo "Using the fallback personal access token for the target host"
+      fi
+
+      if [ "$source_required" != "true" ]; then
+        source_token=""
+        echo "No source token requested"
+      elif [ "$source_is_target" = "true" ]; then
+        source_token="$target_token"
+        echo "The target host is public GitHub, reusing the target token as the source token"
+      elif [ -n "$source_app_token" ]; then
+        source_token="$source_app_token"
+        echo "Using the GitHub App token for public GitHub"
+      elif [ -n "$public_pat" ]; then
+        source_token="$public_pat"
+        echo "Using the fallback personal access token for public GitHub"
+      else
+        source_token="$target_token"
+        echo "No separate credentials for public GitHub, falling back to the target token"
+      fi
+
+      if [ -n "$target_token" ]; then echo "::add-mask::$target_token"; fi
+      if [ -n "$source_token" ]; then echo "::add-mask::$source_token"; fi
+
+      echo "target-token=$target_token" >> $GITHUB_OUTPUT
+      echo "source-token=$source_token" >> $GITHUB_OUTPUT

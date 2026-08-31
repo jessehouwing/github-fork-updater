@@ -1,3 +1,5 @@
+# This workflow is managed by gh actions-lock.
+
 name: PSScriptAnalyzer
 
 on:
@@ -22,22 +24,22 @@ jobs:
 
     steps:
       - name: Harden the runner (Audit all outbound calls)
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        uses: step-security/harden-runner@v2.20.0
         with:
           egress-policy: audit
 
       - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.1
+        uses: actions/checkout@v7.0.1
 
       - name: Run PSScriptAnalyzer
-        uses: microsoft/psscriptanalyzer-action@6b2948b1944407914a58661c49941824d149734f # v1.1
+        uses: microsoft/psscriptanalyzer-action@v1.1
         with:
           path: ./
           recurse: true
           output: results.sarif
 
       - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/upload-sarif@v4.37.3
         if: always()
         with:
           sarif_file: results.sarif

@@ -12,15 +12,10 @@ AfterAll {
 }
 
 Describe "FindAllRepos" {
-    # It "returns more than 30 repositories for the user 'rajbos'" {
-    #     # making sure that pagination works
-    #     $result = FindAllRepos -userName 'rajbos' -PAT '$env:GITHUB_TOKEN'
-    #     $result.Count | Should -BeGreaterThan 30
-    # }
-
     It "returns more than repositories for the org 'devops-actions'" {
         # making sure that pagination works
-        $result = FindAllRepos -org 'devops-actions' -PAT '$env:GITHUB_TOKEN'
+        $gitHubHost = CreateGitHubHost -serverUrl "https://github.com" -token $env:GITHUB_TOKEN
+        $result = FindAllRepos -orgName 'devops-actions' -gitHubHost $gitHubHost
         $result.Count | Should -BeGreaterThan 5
     }
 }

@@ -1,3 +1,5 @@
+# This workflow is managed by gh actions-lock.
+
 name: Send notification on new issue
 on:
   issues:
@@ -14,35 +16,30 @@ jobs:
       issues: write
     steps: 
     - name: Harden the runner (Audit all outbound calls)
-      uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+      uses: step-security/harden-runner@v2.20.0
       with:
         egress-policy: audit
 
-    - uses: peter-murray/workflow-application-token-action@cb731e00cb6754f584507134ff389dfb3dc42bbc # v2.1.0
-      if: ${{ vars.use_github_app == 'true' }}
-      id: get-workflow-token
-      with:
-        application_id: ${{ secrets.GH_AUTOMATION_ID }}
-        application_private_key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
+    - uses: actions/checkout@v7.0.1
 
     - id: get-token
-      env: 
-        github_app_token: ${{ steps.get-workflow-token.outputs.token }}
-        PAT_GITHUB: ${{ secrets.PAT_GITHUB }}
-      run: |
-        if [ -n $github_app_token ]; then
-          echo "token=$github_app_token" >> $GITHUB_OUTPUT
-          echo "Using token from GitHub App"
-        else
-          echo "token=$PAT_GITHUB" >> $GITHUB_OUTPUT
-          echo "Using personal access token from secret 'PAT_GITHUB'"
-        fi
+      name: Resolve the token to use
+      uses: $/.github/actions/resolve-tokens
+      with:
+        target-server-url: ${{ vars.TARGET_SERVER_URL }}
+        # this workflow only comments on an issue in the issues repository
+        source-token-required: 'false'
+        use-github-app: ${{ vars.USE_GITHUB_APP }}
+        app-id: ${{ secrets.GH_AUTOMATION_ID }}
+        private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
+        target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
+        pat: ${{ secrets.PAT_GITHUB }}
 
-    - uses: devops-actions/issue-comment-tag@3a605c5f21e15e5b963c866421bf4189bcc32310 # v0.1.10
+    - uses: devops-actions/issue-comment-tag@v0.1.10
       name: Tag a user or team in an issue comment
       with: 
         issue: ${{ github.event.issue.number }}
         team: ${{ vars.NOTIFICATION_TEAM }}
         owner: ${{ github.repository_owner }}
         repo: ${{ github.repository }}
-        GITHUB_TOKEN: ${{ steps.get-token.outputs.token }}
+        GITHUB_TOKEN: ${{ steps.get-token.outputs.target-token }}

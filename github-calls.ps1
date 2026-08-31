@@ -1,43 +1,41 @@
 
-# placeholder for caching headers
-$CentralHeaders
-function Get-Headers {
-    param (        
-        [string] $userName,
-        [string] $PAT
-    )
-
-    if ($null -ne $CentralHeaders) {
-        return $CentralHeaders
-    }
-
-    $pair = "$($userName):$($PAT)"
-    $encodedCreds = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($pair))
-    $basicAuthValue = "Basic $encodedCreds"
-
-    $CentralHeaders = @{
-        Authorization = $basicAuthValue
-    }
-
-    return $CentralHeaders
-}
+# pull in the host abstraction
+. $PSScriptRoot\github-host.ps1
 
 function CallWebRequest {
     param (
         [string] $url,
-        [string] $userName,
-        [string] $PAT,
+        [object] $gitHubHost,
         [string] $verbToUse = "Get",
-        [object] $body
+        [object] $body,
+        [switch] $throwOnFailure
     )
 
-    $Headers = Get-Headers -userName $userName -PAT $PAT
+    $Headers = GetHeaders -gitHubHost $gitHubHost
+
+    # allow callers to pass a path relative to the host's api url
+    if (-not $url.StartsWith("http")) {
+        $url = "$($gitHubHost.ApiUrl)/$($url.TrimStart('/'))"
+    }
+
+    $info = $null
 
     try {
 
-        $bodyContent = ($body | ConvertTo-Json) -replace '\\', '\'
-        $result = Invoke-WebRequest -Uri $url -Headers $Headers -Method $verbToUse -Body $bodyContent -ErrorAction Stop -ContentType "application/json"
-        
+        $requestParameters = @{
+            Uri         = $url
+            Headers     = $Headers
+            Method      = $verbToUse
+            ErrorAction = "Stop"
+            ContentType = "application/json"
+        }
+
+        if ($null -ne $body) {
+            $requestParameters.Body = ($body | ConvertTo-Json -Depth 10) -replace '\\', '\'
+        }
+
+        $result = Invoke-WebRequest @requestParameters
+
         Write-Host "  StatusCode: $($result.StatusCode)"
         Write-Host "  RateLimit-Limit: $($result.Headers["X-RateLimit-Limit"])"
         Write-Host "  RateLimit-Remaining: $($result.Headers["X-RateLimit-Remaining"])"
@@ -71,7 +69,7 @@ function CallWebRequest {
                     # }
 
                     # continue fetching next page
-                    $nextResult = CallWebRequest -url $nextUrl -userName $userName -PAT $PAT -verbToUse $verbToUse -body $body
+                    $nextResult = CallWebRequest -url $nextUrl -gitHubHost $gitHubHost -verbToUse $verbToUse -body $body
                     $info += $nextResult
                 }
             }
@@ -79,50 +77,94 @@ function CallWebRequest {
 
     }
     catch {
-        Write-Host "Error calling api at [$url]: $($_.Exception)"
-        Write-Host "  StatusCode: $($_.Exception.Response.StatusCode)"
-        if ($_.Exception.Response.Headers) {
-            Write-Host "  RateLimit-Limit: $($_.Exception.Response.Headers.GetValues("X-RateLimit-Limit"))"
-            Write-Host "  RateLimit-Remaining: $($_.Exception.Response.Headers.GetValues("X-RateLimit-Remaining"))"
-            Write-Host "  RateLimit-Reset: $($_.Exception.Response.Headers.GetValues("X-RateLimit-Reset"))"
-            Write-Host "  RateLimit-Used: $($_.Exception.Response.Headers.GetValues("x-ratelimit-used"))"
+        if ($throwOnFailure) {
+            throw
         }
 
-        $messageData = $_.ErrorDetails.Message | ConvertFrom-Json
-        Write-Host "$($_.ErrorDetails.Message)"
-        if ($messageData.message.StartsWith("API rate limit exceeded")) {
+        $statusCode = $null
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+        }
+
+        if ($statusCode -eq 404) {
+            Write-Debug "Call to GitHub Api [$url] returned [not found]"
+            return $null
+        }
+
+        Write-Host "Error calling api at [$url]: $($_.Exception.Message)"
+        Write-Host "  StatusCode: $statusCode"
+
+        $messageData = $null
+        if ($_.ErrorDetails.Message) {
+            try {
+                $messageData = $_.ErrorDetails.Message | ConvertFrom-Json
+            }
+            catch {
+                Write-Host "$($_.ErrorDetails.Message)"
+            }
+        }
+
+        if ($messageData -and $messageData.message -and $messageData.message.StartsWith("API rate limit exceeded")) {
             Write-Error "Rate limit exceeded. Halting execution"
             throw
         }
 
-        if ($messageData.message -eq "Not Found") {
-            Write-Warning "Call to GitHub Api [$url] had [not found] result with documentation url [$($messageData.documentation_url)]"
-            return $messageData.documentation_url
+        if ($messageData) {
+            Write-Host "$($messageData.message)"
         }
-        
-        Write-Host "$messageData"
     }
 
     return $info
 }
 
+function CallGraphQlRequest {
+    param (
+        [object] $gitHubHost,
+        [string] $query,
+        [hashtable] $variables = @{}
+    )
+
+    $headers = GetHeaders -gitHubHost $gitHubHost
+    $body = @{
+        query     = $query
+        variables = $variables
+    } | ConvertTo-Json -Depth 10
+
+    $response = Invoke-RestMethod -Uri $gitHubHost.GraphQlUrl -Headers $headers -Method Post -Body $body -ContentType "application/json" -ErrorAction Stop
+
+    if ($response.errors) {
+        $errorMessages = ($response.errors | ForEach-Object { $_.message }) -join '; '
+        throw "GraphQL errors from [$($gitHubHost.GraphQlUrl)]: $errorMessages"
+    }
+
+    return $response.data
+}
+
+function GetRepoInfo {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName
+    )
+
+    return CallWebRequest -url "repos/$repoFullName" -gitHubHost $gitHubHost
+}
+
 function GetForkCloneUrl {
     param (
         [string] $fork,
-        [string] $PAT
+        [object] $gitHubHost
     )
-    Write-Host "Generate the forkUrl for [$fork]"
-    return "https://xx:$PAT@github.com/$fork.git"
+    Write-Host "Generate the clone url for [$fork] on [$($gitHubHost.ServerUrl)]"
+    return GetCloneUrl -gitHubHost $gitHubHost -repoFullName $fork
 }
 
 function GetParentInfo {
     param (
         [string] $fork,
-        [string] $PAT
+        [object] $gitHubHost
     )
 
-    $repoUrl = "https://api.github.com/repos/$fork"
-    $info = CallWebRequest -url $repoUrl -userName $userName -PAT $PAT
+    $info = GetRepoInfo -gitHubHost $gitHubHost -repoFullName $fork
 
     if ($false -eq $info.fork) {
         Write-Error "Repo [$fork] is not a fork"
@@ -136,17 +178,76 @@ function GetParentInfo {
 
 }
 
-function GetBranchInfo {
+function GetBranchCommit {
     param (
         [string] $parent,
-        [string] $PAT,
+        [object] $gitHubHost,
         [string] $branchName
     )
 
-    $repoUrl = "https://api.github.com/repos/$parent/branches/$branchName"
-    $info = CallWebRequest -url $repoUrl -userName $userName -PAT $PAT
+    $info = CallWebRequest -url "repos/$parent/branches/$branchName" -gitHubHost $gitHubHost
 
-    return $info.commit.commit.author.date
+    return [PSCustomObject]@{
+        sha  = $info.commit.sha
+        date = $info.commit.commit.author.date
+    }
+}
+
+function GetTags {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName
+    )
+
+    # a repository without any tags responds with a 404 here
+    $refs = CallWebRequest -url "repos/$repoFullName/git/refs/tags?per_page=100" -gitHubHost $gitHubHost
+    if ($null -eq $refs) {
+        return @()
+    }
+
+    return @(@($refs) | ForEach-Object {
+            [PSCustomObject]@{
+                name = $_.ref -replace '^refs/tags/', ''
+                sha  = $_.object.sha
+            }
+        })
+}
+
+function GetIssue {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName,
+        [int] $number
+    )
+
+    return CallWebRequest -url "repos/$repoFullName/issues/$number" -gitHubHost $gitHubHost
+}
+
+function UpdateIssueBody {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName,
+        [int] $number,
+        [string] $body
+    )
+
+    $data = [PSCustomObject]@{
+        body = $body
+    }
+
+    $null = CallWebRequest -url "repos/$repoFullName/issues/$number" -gitHubHost $gitHubHost -verbToUse "PATCH" -body $data
+}
+
+function RemoveLabelFromIssue {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName,
+        [int] $number,
+        [string] $label
+    )
+
+    Write-Host "Removing label [$label] from issue [$number] in repository [$repoFullName]"
+    $null = CallWebRequest -url "repos/$repoFullName/issues/$number/labels/$([uri]::EscapeDataString($label))" -gitHubHost $gitHubHost -verbToUse "DELETE"
 }
 
 function AddCommentToIssue {
@@ -154,17 +255,14 @@ function AddCommentToIssue {
         [string] $repoName,
         [string] $message,
         [int] $number,
-        [string] $userName,
-        [string] $PAT
+        [object] $gitHubHost
     )
-
-    $url = "https://api.github.com/repos/$repoName/issues/$number/comments"
 
     $body = [PSCustomObject]@{
         body = $message
     }
 
-    CallWebRequest -url $url -userName $userName -PAT $PAT -body $body -verbToUse "POST"
+    CallWebRequest -url "repos/$repoName/issues/$number/comments" -gitHubHost $gitHubHost -body $body -verbToUse "POST"
 }
 
 
@@ -172,18 +270,15 @@ function CloseIssue {
     param (
         [string] $issuesRepositoryName,
         [int] $number,
-        [string] $userName,
-        [string] $PAT
+        [object] $gitHubHost
     )    
-
-    $url = "https://api.github.com/repos/$issuesRepositoryName/issues/$number"
 
     $data = [PSCustomObject]@{       
         state = "closed"
     }
 
     Write-Host "Closing issue with number [$number] in repository [$issuesRepositoryName]"
-    $result = CallWebRequest -url $url -verbToUse "POST" -body $data -PAT $PAT -userName $userName
+    $result = CallWebRequest -url "repos/$issuesRepositoryName/issues/$number" -verbToUse "POST" -body $data -gitHubHost $gitHubHost
 
     Write-Host "Issue has been closed and can be found at this url: ($($result.html_url))"
 }
@@ -191,19 +286,14 @@ function CloseIssue {
 
 function CreateNewIssueForRepo { 
     param (
-        [Object] $repoInfo,
         [string] $issuesRepositoryName,
         [string] $title,
         [string] $body,
-        [string] $PAT,
-        [string] $userName,
+        [object] $gitHubHost,
         [string] $labels
     )
 
-    $url = "https://api.github.com/repos/$issuesRepositoryName/issues"
-
     $labelsArray = $labels -split ','
-    $labelsJson = $labelsArray | ConvertTo-Json
 
     $data = [PSCustomObject]@{
         title = $title
@@ -212,7 +302,7 @@ function CreateNewIssueForRepo {
     }
 
     Write-Host "Creating a new issue with title [$title] in repository [$issuesRepositoryName]"
-    $result = CallWebRequest -url $url -verbToUse "POST" -body $data -PAT $PAT -userName $userName
+    $result = CallWebRequest -url "repos/$issuesRepositoryName/issues" -verbToUse "POST" -body $data -gitHubHost $gitHubHost
 
     Write-Host "Issue has been created and can be found at this url: ($($result.html_url))"
 }

@@ -4,124 +4,181 @@ param (
     [string] $orgName,
     [string] $userName,
     [string] $PAT,
+    [string] $sourceToken,
+    [string] $targetToken,
+    [string] $targetServerUrl = "https://github.com",
     [string] $issuesRepository
 )
-
-# example parameters:
-#$repoUrl = "https://api.github.com/repos/rajbos-actions/test-repo"
-#$orgName = "rajbos-actions"
 
 # pull in central calls library
 . $PSScriptRoot\github-calls.ps1
 . $PSScriptRoot\library.ps1
+. $PSScriptRoot\sync-mirror.ps1
 
 # placeholder to enable testing locally
 $testingLocally = $false
 
-function FindRepoOrigin {
+# -PAT is the legacy single token parameter and seeds both sides when the new ones are absent
+if ([string]::IsNullOrWhiteSpace($sourceToken)) { $sourceToken = $PAT }
+if ([string]::IsNullOrWhiteSpace($targetToken)) { $targetToken = $PAT }
+
+$sourceHost = CreateGitHubHost -serverUrl "https://github.com" -token $sourceToken
+$targetHost = CreateGitHubHost -serverUrl $targetServerUrl -token $targetToken -userName $userName
+
+function GetUpstreamState {
     param (
-        [string] $repoUrl,
-        [string] $userName,
-        [string] $PAT
+        [object] $repo,
+        [object] $sourceHost,
+        [object] $targetHost,
+        [object] $syncSettings
     )
-    
-    $info = CallWebRequest -url $repoUrl -userName $userName -PAT $PAT
-        
-    if ($false -eq $info.fork) {
-        Write-Error "The repo with url [$repoUrl] is not a fork"
-        throw
+
+    $upstream = ResolveUpstream -repo $repo -syncSettings $syncSettings
+    if ($null -eq $upstream) {
+        return $null
     }
 
-    Write-Host "Forks default branch = [$($info.parent.default_branch)] [$($info.parent.branches_url)] with last push [$($info.pushed_at)]"
-    Write-Host "Found parent [$($info.parent.html_url)] of repo [$repoUrl], last push was on [$($info.parent.pushed_at)]"
-
-    $defaultBranch = $info.parent.default_branch
-    $parentDefaultBranchUrl = $info.parent.branches_url -replace "{/branch}", "/$($defaultBranch)"
-    Write-Host "Branches url for default branch: " $parentDefaultBranchUrl
-
-    $branchLastCommitDate = GetBranchInfo -PAT $PAT -parent $info.parent.full_name -branchName $defaultBranch
-
-    if ($info.pushed_at -lt $branchLastCommitDate) {
-        Write-Host "There are new updates on the parent available on the default branch [$defaultBranch], last commit date: [$branchLastCommitDate]"
+    $resolved = ResolveRepoAcrossHosts -repoFullName $upstream -targetHost $targetHost -sourceHost $sourceHost
+    if ($null -eq $resolved) {
+        Write-Warning "Could not find upstream [$upstream] for [$($repo.full_name)] on either host"
+        return $null
     }
 
-    # build the compare url
-    $compareUrl = "https://github.com/$($info.full_name)/compare/$defaultBranch..$($info.parent.owner.login):$defaultBranch"
-    Write-Host "You can compare the default branches using this link: $compareUrl"
+    $upstreamInfo = $resolved.repo
+    $upstreamHost = $resolved.gitHubHost
+    $defaultBranch = $upstreamInfo.default_branch
+
+    Write-Host "Found upstream [$($upstreamInfo.full_name)] on [$($upstreamHost.ServerUrl)] for [$($repo.full_name)], default branch [$defaultBranch]"
+
+    $branchCommit = GetBranchCommit -gitHubHost $upstreamHost -parent $upstreamInfo.full_name -branchName $defaultBranch
+
+    $compareUrl = "$($upstreamHost.ServerUrl)/$($upstreamInfo.full_name)/commits/$defaultBranch"
+    if ($repo.fork) {
+        $compareUrl = "$($targetHost.ServerUrl)/$($repo.full_name)/compare/$defaultBranch..$($upstreamInfo.owner.login):$defaultBranch"
+    }
 
     return [PSCustomObject]@{
-        parentUrl = $info.parent.html_url
-        parentArchived = $info.parent.archived        
-        defaultBranch = $defaultBranch
-        lastPushRepo = $info.pushed_at
-        lastPushParent = $branchLastCommitDate
-        updateAvailable = ($info.pushed_at -lt $branchLastCommitDate)
-        compareUrl = $compareUrl
+        parentUrl       = $upstreamInfo.html_url
+        parentArchived  = $upstreamInfo.archived
+        upstreamName    = $upstreamInfo.full_name
+        upstreamHost    = $upstreamHost
+        isFork          = [bool]$repo.fork
+        defaultBranch   = $defaultBranch
+        headSha         = $branchCommit.sha
+        lastPushRepo    = $repo.pushed_at
+        lastPushParent  = $branchCommit.date
+        updateAvailable = ($repo.pushed_at -lt $branchCommit.date)
+        compareUrl      = $compareUrl
     }
 }
 
-
-function GetParentHasUpdatesAvailable {
+function TestReleasesOutOfSync {
     param (
-        [string] $repoUrl,
-        [string] $userName,
-        [string] $PAT
+        [string] $mirror,
+        [string] $upstream,
+        [object] $sourceHost,
+        [object] $targetHost,
+        [object] $syncSettings
     )
 
-    $parent = FindRepoOrigin -repoUrl $repoUrl -userName $userName -PAT $PAT
-    if ($null -ne $parent) {
-        Write-Host "The repo is forked and the fork is from [$($parent.parentUrl)]"
-        return $parent.updateAvailable
+    if ($syncSettings.syncReleases -eq 'none') {
+        return $false
+    }
+
+    $upstreamReleases = GetUpstreamReleases -gitHubHost $sourceHost -repoFullName $upstream | Where-Object { -not $_.isDraft }
+    if ($syncSettings.syncReleases -eq 'immutable') {
+        $upstreamReleases = $upstreamReleases | Where-Object { $_.immutable -eq $true }
+    }
+
+    $existingReleases = CallWebRequest -url "repos/$mirror/releases?per_page=100" -gitHubHost $targetHost
+    $existingTags = @($existingReleases | ForEach-Object { $_.tag_name })
+
+    $missing = @($upstreamReleases | Where-Object { $existingTags -notcontains $_.tagName })
+    if ($missing.Count -gt 0) {
+        Write-Host "Found [$($missing.Count)] releases on [$upstream] that are missing on [$mirror]"
+        return $true
     }
 
     return $false
+}
+
+function SyncRepo {
+    param (
+        [object] $repoInfo,
+        [object] $sourceHost,
+        [object] $targetHost
+    )
+
+    Write-Host "Syncing mirror [$($repoInfo.repoName)] from upstream [$($repoInfo.upstreamName)]"
+
+    $refResult = SyncMirrorRefs -mirror $repoInfo.repoName -upstream $repoInfo.upstreamName -sourceHost $sourceHost -targetHost $targetHost -syncSettings $repoInfo.syncSettings
+    $releaseResult = SyncReleases -mirror $repoInfo.repoName -upstream $repoInfo.upstreamName -sourceHost $sourceHost -targetHost $targetHost -syncSettings $repoInfo.syncSettings
+
+    return ($refResult.success -and $releaseResult.success)
 }
 
 
 function CheckAllReposInOrg {
     param (
         [string] $orgName,
-        [string] $userName,
-        [string] $PAT,
-        [string] $issuesRepository
+        [object] $sourceHost,
+        [object] $targetHost
     )
 
-    Write-Host "Running a check on all repositories inside of organization [$orgName] with user [$userName] and a PAT that has length [$($PAT.Length)]"
+    Write-Host "Running a check on all repositories inside of organization [$orgName] on [$($targetHost.ServerUrl)]"
 
-    $repos = FindAllRepos -orgName $orgName -userName $userName -PAT $PAT
+    $repos = FindAllRepos -orgName $orgName -gitHubHost $targetHost
 
     # create hastable
     $reposWithUpdates = @()
 
     foreach ($repo in $repos) {
-        if ($repo.fork -and !$repo.archived -and !$repo.disabled) {
-            Write-Host "Checking repository [$($repo.full_name)]"
-            
-            $repoInfo = FindRepoOrigin -repoUrl $repo.url -userName $userName -PAT $PAT
-            if ($repoInfo.updateAvailable -or $repoInfo.parentArchived) {
-                Write-Host "Found new updates in the parent repository [$($repoInfo.parentUrl)], compare the changes with [$($repoInfo.compareUrl)]"
+        if ($repo.archived -or $repo.disabled) {
+            Write-Host "Skipping repository [$($repo.full_name)] since it has been archived or is disabled"
+            continue
+        }
 
-                $repoData = [PSCustomObject]@{
-                    repoName = $repo.full_name
-                    parentArchived = $repoInfo.parentArchived
-                    parentUrl = $repoInfo.parentUrl
-                    compareUrl = $repoInfo.compareUrl
-                }
+        Write-Host "Checking repository [$($repo.full_name)]"
 
-                $reposWithUpdates += $repoData
-            } 
-            else {
-                Write-Host "No updates available from parent"
+        $properties = GetRepoCustomProperties -gitHubHost $targetHost -repoFullName $repo.full_name
+        $syncSettings = GetSyncSettings -properties $properties -repoFullName $repo.full_name
+
+        $repoInfo = GetUpstreamState -repo $repo -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings
+        if ($null -eq $repoInfo) {
+            continue
+        }
+
+        $releasesOutOfSync = $false
+        if (-not $repoInfo.isFork) {
+            $releasesOutOfSync = TestReleasesOutOfSync -mirror $repo.full_name -upstream $repoInfo.upstreamName -sourceHost $repoInfo.upstreamHost -targetHost $targetHost -syncSettings $syncSettings
+        }
+
+        if ($repoInfo.updateAvailable -or $repoInfo.parentArchived -or $releasesOutOfSync) {
+            Write-Host "Found new updates in the upstream repository [$($repoInfo.parentUrl)], compare the changes with [$($repoInfo.compareUrl)]"
+
+            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -syncSettings $syncSettings -isFork $repoInfo.isFork
+
+            $repoData = [PSCustomObject]@{
+                repoName       = $repo.full_name
+                parentArchived = $repoInfo.parentArchived
+                parentUrl      = $repoInfo.parentUrl
+                compareUrl     = $repoInfo.compareUrl
+                upstreamName   = $repoInfo.upstreamName
+                isFork         = $repoInfo.isFork
+                syncSettings   = $syncSettings
+                snapshot       = $snapshot
             }
+
+            $reposWithUpdates += $repoData
         }
         else {
-            Write-Host "Skipping repository [$($repo.full_name)] since it is not a fork or has been archived or is disabled"
+            Write-Host "No updates available from upstream"
         }
     }
 
-    Write-Host "Found [$($reposWithUpdates.Count)] forks with available updates"
+    Write-Host "Found [$($reposWithUpdates.Count)] repositories with available updates"
     if ($null -ne $env:GITHUB_STEP_SUMMARY) {
-        Write-Output "Found [$($reposWithUpdates.Count)] forks with available updates" >> $env:GITHUB_STEP_SUMMARY
+        Write-Output "Found [$($reposWithUpdates.Count)] repositories with available updates" >> $env:GITHUB_STEP_SUMMARY
     }
     return $reposWithUpdates
 }
@@ -131,72 +188,98 @@ function CreateIssueFor {
         [object] $repoInfo,
         [string] $issuesRepositoryName,
         [object] $existingIssues,
-        [string] $PAT,
-        [string] $userName
+        [object] $gitHubHost
     )
-
-    #Write-Host "- repoName $($repoInfo.repoName)"
-    #Write-Host "- parentUrl $($repoInfo.parentUrl)"
-    #Write-Host "- compareUrl $($repoInfo.compareUrl)"
 
     $labels = ""
     if ($repoInfo.parentArchived) {
         $issueTitle = "Parent repository for [$($repoInfo.repoName)] is archived"
-        $body = "The parent repository for **[$($repoInfo.repoName)](https://github.com/$($repoInfo.repoName))** is archived. `r`n### Important!`r`nConsider revisiting the usage and find alternatives.`r`nLeave this issue open or it will be recreated."
+        $body = "The parent repository for **[$($repoInfo.repoName)]($($repoInfo.parentUrl))** is archived. `r`n### Important!`r`nConsider revisiting the usage and find alternatives.`r`nLeave this issue open or it will be recreated."
         $labels = "parent-archived"
     } else {
-        $body = "The parent repository for **[$($repoInfo.repoName)](https://github.com/$($repoInfo.repoName))** has updates available. `r`n### Important!`r`nClick on this [compare link]($($repoInfo.compareUrl)) to check the incoming changes before updating the fork. `r`n `r`n### To update the fork`r`nAdd the label **update-fork** to this issue to update the fork automatically."
+        $body = "The parent repository for **[$($repoInfo.repoName)]($($repoInfo.parentUrl))** has updates available. `r`n### Important!`r`nClick on this [compare link]($($repoInfo.compareUrl)) to check the incoming changes before updating the fork. `r`n `r`n### To update the fork`r`nAdd the label **update-fork** to this issue to update the fork automatically."
         $issueTitle = "Parent repository for [$($repoInfo.repoName)] has updates available"
         $labels = "update-available"
     }
+
+    if ($repoInfo.snapshot) {
+        $body = UpdateApprovalSnapshotInBody -issueBody $body -snapshot $repoInfo.snapshot
+    }
+
     $existingIssueForRepo = $existingIssues | Where-Object {$_.title -eq $issueTitle}
 
     if ($null -eq $existingIssueForRepo) {
-        CreateNewIssueForRepo -repoInfo $repo -issuesRepositoryName $issuesRepository -title $issueTitle -body $body -PAT $PAT -userName $userName -labels $labels
-    } 
-    else {
-        # the issue already exists. Doesn't make sense to update the existing issue
-        # If we need to, we can send in a PATCH to the same url while adding an 'issue_number' parameter to the body
-        Write-Host "Issue with title [$issueTitle] already exists"
+        CreateNewIssueForRepo -issuesRepositoryName $issuesRepositoryName -title $issueTitle -body $body -gitHubHost $gitHubHost -labels $labels
+        return
     }
+
+    $approved = ParseApprovalSnapshot -issueBody $existingIssueForRepo.body
+    $comparison = CompareApprovalSnapshots -approved $approved -current $repoInfo.snapshot
+
+    if (-not $comparison.changed) {
+        Write-Host "Issue with title [$issueTitle] already exists and still covers the current upstream version"
+        return
+    }
+
+    # the upstream moved on, so whatever was reviewed before is no longer what would be applied
+    Write-Host "Upstream for [$($repoInfo.repoName)] changed since issue [$($existingIssueForRepo.number)] was created, resetting the approval"
+
+    UpdateIssueBody -gitHubHost $gitHubHost -repoFullName $issuesRepositoryName -number $existingIssueForRepo.number -body $body
+    RemoveLabelFromIssue -gitHubHost $gitHubHost -repoFullName $issuesRepositoryName -number $existingIssueForRepo.number -label "update-fork"
+
+    $message = ":warning: The upstream repository changed since this issue was created, so the previous approval no longer applies:`r`n- $($comparison.differences -join "`r`n- ")`r`n`r`nReview the changes again and re-apply the **update-fork** label."
+    AddCommentToIssue -gitHubHost $gitHubHost -repoName $issuesRepositoryName -number $existingIssueForRepo.number -message $message
 }
 
 function CreateIssuesForReposWithUpdates {
     param(
          [object] $reposWithUpdates,
          [string] $issuesRepository,
-         [string] $PAT,
-         [string] $userName
+         [object] $gitHubHost
     )
 
-    # load existing issues in the issues repo    
-    # https://api.github.com/repos/{owner}/{repo}/issues
-    $url = "https://api.github.com/repos/$issuesRepository/issues"
-    $existingIssues = CallWebRequest -url $url -userName $userName -PAT $PAT
+    $existingIssues = CallWebRequest -url "repos/$issuesRepository/issues" -gitHubHost $gitHubHost
 
     Write-Host "Found $($existingIssues.Count) existing issues in issues repository [$issuesRepository]"
 
     foreach ($repo in $reposWithUpdates) {        
-        CreateIssueFor -repoInfo $repo -issuesRepository $issuesRepository -existingIssues $existingIssues -PAT $PAT -userName $userName
+        CreateIssueFor -repoInfo $repo -issuesRepositoryName $issuesRepository -existingIssues $existingIssues -gitHubHost $gitHubHost
+    }
+}
+
+function ProcessReposWithUpdates {
+    param (
+        [object] $reposWithUpdates,
+        [string] $issuesRepository,
+        [object] $sourceHost,
+        [object] $targetHost
+    )
+
+    # repos configured with sync-mode: auto are synced straight away, the rest go through an issue
+    $autoSync = @($reposWithUpdates | Where-Object { $_.syncSettings.syncMode -eq 'auto' -and -not $_.isFork })
+    $needsApproval = @($reposWithUpdates | Where-Object { $_.syncSettings.syncMode -ne 'auto' -or $_.isFork })
+
+    foreach ($repo in $autoSync) {
+        $null = SyncRepo -repoInfo $repo -sourceHost $sourceHost -targetHost $targetHost
+    }
+
+    if ($needsApproval.Count -gt 0) {
+        CreateIssuesForReposWithUpdates -reposWithUpdates $needsApproval -issuesRepository $issuesRepository -gitHubHost $targetHost
     }
 }
 
 function TestLocally {
     param (
         [string] $orgName,
-        [string] $userName,
-        [string] $PAT,
+        [object] $sourceHost,
+        [object] $targetHost,
         [string] $issuesRepository
     )
 
-    $env:reposWithUpdates = $null
-    # load the repos with updates if we don't have them available yet
-    if($null -eq $env:reposWithUpdates) {
-        $env:reposWithUpdates = (CheckAllReposInOrg -orgName $orgName -userName $userName -PAT $PAT -issuesRepository $issuesRepository) | ConvertTo-Json
-    }
+    $reposWithUpdates = CheckAllReposInOrg -orgName $orgName -sourceHost $sourceHost -targetHost $targetHost
 
-    if ($env:reposWithUpdates.Count -gt 0) {
-        CreateIssuesForReposWithUpdates ($env:reposWithUpdates | ConvertFrom-Json) -issuesRepository $issuesRepository -userName $userName -PAT $PAT
+    if ($reposWithUpdates.Count -gt 0) {
+        ProcessReposWithUpdates -reposWithUpdates $reposWithUpdates -issuesRepository $issuesRepository -sourceHost $sourceHost -targetHost $targetHost
     }
 }
 
@@ -204,14 +287,14 @@ function TestLocally {
 #$orgName = "rajbos"; $userName = "xxx"; $PAT = $env:GitHubPAT; $testingLocally = $true; $issuesRepository = "rajbos/github-fork-updater"
 
 if ($testingLocally) {
-    TestLocally -orgName $orgName -userName $userName -PAT $PAT -issuesRepository $issuesRepository
+    TestLocally -orgName $orgName -sourceHost $sourceHost -targetHost $targetHost -issuesRepository $issuesRepository
 }
 else {
     # production flow:
-    $reposWithUpdates = CheckAllReposInOrg -orgName $orgName -userName $userName -PAT $PAT -issuesRepository $issuesRepository
+    $reposWithUpdates = CheckAllReposInOrg -orgName $orgName -sourceHost $sourceHost -targetHost $targetHost
 
     if ($reposWithUpdates.Count -gt 0) {
-        CreateIssuesForReposWithUpdates $reposWithUpdates -issuesRepository $issuesRepository -userName $userName -PAT $PAT
+        ProcessReposWithUpdates -reposWithUpdates $reposWithUpdates -issuesRepository $issuesRepository -sourceHost $sourceHost -targetHost $targetHost
     }
 
     return $reposWithUpdates

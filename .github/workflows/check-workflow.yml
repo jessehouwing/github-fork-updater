@@ -1,3 +1,5 @@
+# This workflow is managed by gh actions-lock.
+
 name: Check for updates for all forks
 on: 
   push:
@@ -18,39 +20,39 @@ jobs:
 
     steps:
     - name: Harden the runner (Audit all outbound calls)
-      uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+      uses: step-security/harden-runner@v2.20.0
       with:
         egress-policy: audit
 
-    - uses: peter-murray/workflow-application-token-action@cb731e00cb6754f584507134ff389dfb3dc42bbc # v2.1.0
-      name: Get token from GitHub App
-      if: ${{ vars.USE_GITHUB_APP == 'true' }}
-      id: get-workflow-token
-      with:
-        application_id: ${{ secrets.GH_AUTOMATION_ID }}
-        application_private_key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
+    - uses: actions/checkout@v7.0.1
 
     - id: get-token
-      name: Determine token to use
-      env: 
-        github_app_token: ${{ steps.get-workflow-token.outputs.token }}
-        PAT_GITHUB: ${{ secrets.PAT_GITHUB }}
-      run: |
-        if [ -n "$github_app_token" ]; then
-          echo "token=$github_app_token" >> $GITHUB_OUTPUT
-          echo "Using token from GitHub App"
-        else
-          echo "token=$PAT_GITHUB" >> $GITHUB_OUTPUT
-          echo "Using personal access token from secret 'PAT_GITHUB'"
-        fi
-
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6.0.1
+      name: Resolve the tokens to use
+      uses: $/.github/actions/resolve-tokens
+      with:
+        target-server-url: ${{ vars.TARGET_SERVER_URL }}
+        use-github-app: ${{ vars.USE_GITHUB_APP }}
+        app-id: ${{ secrets.GH_AUTOMATION_ID }}
+        private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
+        target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
+        pat: ${{ secrets.PAT_GITHUB }}
+        use-public-github-app: ${{ vars.USE_PUBLIC_GITHUB_APP }}
+        public-app-id: ${{ secrets.GH_PUBLIC_APP_ID }}
+        public-private-key: ${{ secrets.GH_PUBLIC_APP_PRIVATE_KEY }}
+        public-org: ${{ vars.PUBLIC_GITHUB_ORG }}
+        public-pat: ${{ secrets.PAT_GITHUB_PUBLIC }}
 
     - id: update_step
       shell: pwsh
       name: Check for updates
+      env:
+        ORG_NAME: ${{ vars.TARGET_ORG || github.repository_owner }}
+        ISSUES_REPOSITORY: ${{ github.repository }}
+        TARGET_TOKEN: ${{ steps.get-token.outputs.target-token }}
+        SOURCE_TOKEN: ${{ steps.get-token.outputs.source-token }}
+        TARGET_SERVER_URL: ${{ steps.get-token.outputs.target-server-url }}
       run: | 
-        $updateResult = (.\updater.ps1 -orgName ${{ github.repository_owner }} -userName "xxx" -PAT ${{ steps.get-token.outputs.token }} -issuesRepository ${{ github.repository }} )
+        $updateResult = (.\updater.ps1 -orgName $env:ORG_NAME -userName "xxx" -targetToken $env:TARGET_TOKEN -sourceToken $env:SOURCE_TOKEN -targetServerUrl $env:TARGET_SERVER_URL -issuesRepository $env:ISSUES_REPOSITORY )
         
         if ($null -ne $updateResult) {
           $reposWithUpdates = $updateResult[-1]

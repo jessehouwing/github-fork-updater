@@ -5,6 +5,9 @@ param (
     [string] $orgName,
     [string] $userName,
     [string] $PAT,
+    [string] $sourceToken,
+    [string] $targetToken,
+    [string] $targetServerUrl = "https://github.com",
     [string] $issuesRepository,
     [string] $issueTitle,
     [int] $issueId,
@@ -13,6 +16,15 @@ param (
 
 # include local library code
 . $PSScriptRoot\github-calls.ps1
+. $PSScriptRoot\library.ps1
+. $PSScriptRoot\sync-mirror.ps1
+
+# -PAT is the legacy single token parameter and seeds both sides when the new ones are absent
+if ([string]::IsNullOrWhiteSpace($sourceToken)) { $sourceToken = $PAT }
+if ([string]::IsNullOrWhiteSpace($targetToken)) { $targetToken = $PAT }
+
+$sourceHost = CreateGitHubHost -serverUrl "https://github.com" -token $sourceToken
+$targetHost = CreateGitHubHost -serverUrl $targetServerUrl -token $targetToken -userName $userName
 
 function ParseIssueTitle {
     param (
@@ -32,10 +44,10 @@ $sourceDirectory = "source"
 function UpdateFork {
     param (
         [string] $fork,
-        [string] $PAT
+        [object] $gitHubHost
     )
 
-    $forkUrl = GetForkCloneUrl -fork $fork -PAT $PAT
+    $forkUrl = GetForkCloneUrl -fork $fork -gitHubHost $gitHubHost
 
     # set user settings
     git config --global user.email "noreply@githubupdater.com"
@@ -47,7 +59,7 @@ function UpdateFork {
     Write-Host "Clone fork from url [$forkUrl]"
     git clone $forkUrl .
 
-    $parent = GetParentInfo -fork $fork -PAT $PAT
+    $parent = GetParentInfo -fork $fork -gitHubHost $gitHubHost
     Write-Host "Found forks parent with url [$($parent.parentUrl)]"
 
     # add remote to the parent
@@ -83,40 +95,98 @@ function UpdateFork {
 function Main {
     param (
         [string] $issueTitle,
-        [string] $PAT,
+        [object] $sourceHost,
+        [object] $targetHost,
         [int] $issueId,
         [string] $issuesRepository
     )
 
-    Write-Host "Starting the update for issue with title [$issueTitle] having number [$issueId] on repository [$issuesRepository] and a PAT that has length [$($PAT.Length)]"
+    Write-Host "Starting the update for issue with title [$issueTitle] having number [$issueId] on repository [$issuesRepository]"
 
     $workflowRunUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
     Write-Host "Found workflowRunUrl: [$workflowRunUrl]"
 
     $fork = ParseIssueTitle -issueTitle $issueTitle
-    AddCommentToIssue -number $issueId -message "Updating the fork with the incoming changes from the parent repository through [update-workflow]($workflowRunUrl)." -repoName $issuesRepository -PAT $PAT
-    $forkResult = UpdateFork -fork $fork -PAT $PAT
-    if ($forkResult -eq 1) {
-        Write-Host "Error with the update of the fork, halting execution"
-        AddCommentToIssue -number $issueId -message ":warning: Found merge conflicts, aborting the update" -repoName $issuesRepository -PAT $PAT
+
+    $repo = GetRepoInfo -gitHubHost $targetHost -repoFullName $fork
+    if ($null -eq $repo) {
+        Write-Host "Could not find repository [$fork] on [$($targetHost.ServerUrl)], halting execution"
+        AddCommentToIssue -number $issueId -message ":warning: Could not find repository [$fork]" -repoName $issuesRepository -gitHubHost $targetHost
         return 1
     }
 
-    Write-Host "Cleaning up"
-    Set-Location ..
-    Remove-Item -Force -Recurse $sourceDirectory
+    $properties = GetRepoCustomProperties -gitHubHost $targetHost -repoFullName $fork
+    $syncSettings = GetSyncSettings -properties $properties -repoFullName $fork
+    $upstream = ResolveUpstream -repo $repo -syncSettings $syncSettings
+
+    if ($null -eq $upstream) {
+        AddCommentToIssue -number $issueId -message ":warning: Could not resolve an upstream repository for [$fork]" -repoName $issuesRepository -gitHubHost $targetHost
+        return 1
+    }
+
+    $resolved = ResolveRepoAcrossHosts -repoFullName $upstream -targetHost $targetHost -sourceHost $sourceHost
+    if ($null -eq $resolved) {
+        AddCommentToIssue -number $issueId -message ":warning: Could not find the upstream repository [$upstream]" -repoName $issuesRepository -gitHubHost $targetHost
+        return 1
+    }
+
+    $upstreamHost = $resolved.gitHubHost
+    $defaultBranch = $resolved.repo.default_branch
+    $branchCommit = GetBranchCommit -gitHubHost $upstreamHost -parent $upstream -branchName $defaultBranch
+
+    # only apply what was actually reviewed: re-check the upstream against the versions recorded on the issue
+    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -syncSettings $syncSettings -isFork ([bool]$repo.fork)
+
+    $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
+    $approved = ParseApprovalSnapshot -issueBody $issue.body
+    $comparison = CompareApprovalSnapshots -approved $approved -current $currentSnapshot
+
+    if ($comparison.changed) {
+        Write-Host "The upstream changed since the approval, a new approval is required"
+
+        UpdateIssueBody -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId -body (UpdateApprovalSnapshotInBody -issueBody $issue.body -snapshot $currentSnapshot)
+        RemoveLabelFromIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId -label "update-fork"
+
+        $message = ":warning: The update was **not** applied. The upstream repository changed since this issue was approved:`r`n- $($comparison.differences -join "`r`n- ")`r`n`r`nReview the incoming changes again and re-apply the **update-fork** label to approve the new version."
+        AddCommentToIssue -number $issueId -message $message -repoName $issuesRepository -gitHubHost $targetHost
+        return 0
+    }
+
+    AddCommentToIssue -number $issueId -message "Updating the fork with the approved changes from the parent repository through [update-workflow]($workflowRunUrl)." -repoName $issuesRepository -gitHubHost $targetHost
+
+    if ($repo.fork) {
+        $forkResult = UpdateFork -fork $fork -gitHubHost $targetHost
+        if ($forkResult -eq 1) {
+            Write-Host "Error with the update of the fork, halting execution"
+            AddCommentToIssue -number $issueId -message ":warning: Found merge conflicts, aborting the update" -repoName $issuesRepository -gitHubHost $targetHost
+            return 1
+        }
+
+        Write-Host "Cleaning up"
+        Set-Location ..
+        Remove-Item -Force -Recurse $sourceDirectory
+    }
+    else {
+        $refResult = SyncMirrorRefs -mirror $fork -upstream $upstream -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings
+        $null = SyncReleases -mirror $fork -upstream $upstream -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings
+
+        if (-not $refResult.success) {
+            AddCommentToIssue -number $issueId -message ":warning: Some references could not be synced:`r`n- $($refResult.failures -join "`r`n- ")" -repoName $issuesRepository -gitHubHost $targetHost
+            return 1
+        }
+    }
 
     # make sure we are back where we started (for easier local testing)
     Set-Location $PSScriptRoot
 
-    AddCommentToIssue -number $issueId -message "Fork has been updated" -repoName $issuesRepository -PAT $PAT
-    CloseIssue -number $issueId -issuesRepositoryName $issuesRepository -PAT $PAT
+    AddCommentToIssue -number $issueId -message "Fork has been updated" -repoName $issuesRepository -gitHubHost $targetHost
+    CloseIssue -number $issueId -issuesRepositoryName $issuesRepository -gitHubHost $targetHost
 }
 
 # uncomment for local testing
 #$issueTitle = "Parent repository for [rajbos/pickles] has updates available"; $PAT=$env:GitHubPAT; $repoName = "rajbos/github-fork-updater"; $issueId = 24
 
-$result = Main -issueTitle $issueTitle -PAT $PAT -issueId $issueId -issuesRepository $issuesRepository
+$result = Main -issueTitle $issueTitle -sourceHost $sourceHost -targetHost $targetHost -issueId $issueId -issuesRepository $issuesRepository
 if ($result -eq 1) {
     Write-Host "Error with the update of the fork, returning with failure"
     exit 1
