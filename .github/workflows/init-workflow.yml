@@ -1,0 +1,44 @@
+name: Initialize the labels
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  create-labels:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # needed to create the labels in this repository
+      issues: write
+
+    steps:
+    - name: Harden the runner (Audit all outbound calls)
+      uses: step-security/harden-runner@v2.20.0
+      with:
+        egress-policy: audit
+
+    - uses: actions/checkout@v7.0.1
+
+    - id: get-token
+      name: Resolve the token to use
+      uses: $/.github/actions/resolve-tokens
+      with:
+        target-server-url: ${{ vars.TARGET_SERVER_URL }}
+        # the labels live in the issues repository on the target host
+        source-token-required: 'false'
+        use-github-app: ${{ vars.USE_GITHUB_APP }}
+        app-id: ${{ secrets.GH_AUTOMATION_ID }}
+        private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
+        target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
+        pat: ${{ secrets.PAT_GITHUB }}
+
+    - name: Create the labels
+      shell: pwsh
+      env:
+        ISSUES_REPOSITORY: ${{ github.repository }}
+        TARGET_TOKEN: ${{ steps.get-token.outputs.target-token }}
+        TARGET_SERVER_URL: ${{ steps.get-token.outputs.target-server-url }}
+      run: |
+        .\init-labels.ps1 -userName "xxx" -targetToken $env:TARGET_TOKEN -targetServerUrl $env:TARGET_SERVER_URL -issuesRepository $env:ISSUES_REPOSITORY

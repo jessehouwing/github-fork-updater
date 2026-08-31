@@ -25,6 +25,9 @@ function NewApprovalSnapshot {
         [string] $upstream,
         [string] $defaultBranch,
         [string] $headSha,
+        [string] $baseSha,
+        [string] $compareUrl,
+        [string] $upstreamUrl,
         [object[]] $tags = @(),
         [string[]] $releaseTags = @()
     )
@@ -32,15 +35,35 @@ function NewApprovalSnapshot {
     $tagEntries = @(@($tags) | ForEach-Object { "$($_.name)@$($_.sha)" })
     $sortedReleaseTags = @(@($releaseTags) | Sort-Object)
 
+    # baseSha, compareUrl and upstreamUrl are only used to render the issue, they are never compared
     return [PSCustomObject]@{
         upstream       = $upstream
         defaultBranch  = $defaultBranch
         headSha        = $headSha
+        baseSha        = $baseSha
+        compareUrl     = $compareUrl
+        upstreamUrl    = $upstreamUrl
         tagCount       = $tagEntries.Count
         tagsDigest     = GetContentDigest -values $tagEntries
         releaseTags    = $sortedReleaseTags
         releasesDigest = GetContentDigest -values $sortedReleaseTags
     }
+}
+
+function GetShortSha {
+    param (
+        [string] $sha
+    )
+
+    if ([string]::IsNullOrWhiteSpace($sha)) {
+        return ""
+    }
+
+    if ($sha.Length -le 7) {
+        return $sha
+    }
+
+    return $sha.Substring(0, 7)
 }
 
 function FormatApprovalSnapshot {
@@ -55,12 +78,32 @@ function FormatApprovalSnapshot {
     $lines += ""
     $lines += "| What | Approved version |"
     $lines += "| --- | --- |"
-    $lines += "| Upstream | ``$($snapshot.upstream)`` |"
-    $lines += "| Branch | ``$($snapshot.defaultBranch)`` at ``$($snapshot.headSha)`` |"
-    $lines += "| Tags | $($snapshot.tagCount) |"
+
+    if ($snapshot.upstreamUrl) {
+        $lines += "| Upstream | [``$($snapshot.upstream)``]($($snapshot.upstreamUrl)/$($snapshot.upstream)) |"
+    }
+    else {
+        $lines += "| Upstream | ``$($snapshot.upstream)`` |"
+    }
+
+    $branch = "``$($snapshot.defaultBranch)`` at ``$(GetShortSha -sha $snapshot.headSha)``"
+    if ($snapshot.compareUrl) {
+        $branch += " ([review the incoming commits]($($snapshot.compareUrl)))"
+    }
+    $lines += "| Branch | $branch |"
+
+    $tags = "$($snapshot.tagCount)"
+    if ($snapshot.tagCount -gt 0 -and $snapshot.upstreamUrl) {
+        $tags = "[$($snapshot.tagCount)]($($snapshot.upstreamUrl)/$($snapshot.upstream)/tags)"
+    }
+    $lines += "| Tags | $tags |"
 
     if ($snapshot.releaseTags.Count -gt 0) {
-        $lines += "| Releases | $(@($snapshot.releaseTags) -join ', ') |"
+        $releases = @($snapshot.releaseTags)
+        if ($snapshot.upstreamUrl) {
+            $releases = @($releases | ForEach-Object { "[$_]($($snapshot.upstreamUrl)/$($snapshot.upstream)/releases/tag/$([uri]::EscapeDataString($_)))" })
+        }
+        $lines += "| Releases | $($releases -join ', ') |"
     }
 
     $lines += ""

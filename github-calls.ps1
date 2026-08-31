@@ -213,6 +213,42 @@ function GetTags {
         })
 }
 
+function SetLabel {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName,
+        [string] $name,
+        [string] $color,
+        [string] $description
+    )
+
+    $data = [PSCustomObject]@{
+        name        = $name
+        color       = $color
+        description = $description
+    }
+
+    $labelUrl = "repos/$repoFullName/labels/$([uri]::EscapeDataString($name))"
+    $existing = CallWebRequest -url $labelUrl -gitHubHost $gitHubHost
+
+    if ($null -ne $existing) {
+        $result = CallWebRequest -url $labelUrl -gitHubHost $gitHubHost -verbToUse "PATCH" -body $data
+        $action = "updated"
+    }
+    else {
+        $result = CallWebRequest -url "repos/$repoFullName/labels" -gitHubHost $gitHubHost -verbToUse "POST" -body $data
+        $action = "created"
+    }
+
+    if ($null -eq $result) {
+        Write-Warning "Could not create or update label [$name] in repository [$repoFullName]"
+        return $false
+    }
+
+    Write-Host "Label [$name] has been $action in repository [$repoFullName]"
+    return $true
+}
+
 function GetIssue {
     param (
         [object] $gitHubHost,

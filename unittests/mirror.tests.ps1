@@ -1,6 +1,57 @@
 BeforeAll {
     . $PSScriptRoot\..\library.ps1
     . $PSScriptRoot\..\sync-mirror.ps1
+    . $PSScriptRoot\..\labels.ps1
+}
+
+Describe "GetRequiredLabels" {
+    It "defines the <name> label the code applies" -ForEach @(
+        @{ name = "update-available" }
+        @{ name = "parent-archived" }
+        @{ name = "update-fork" }
+    ) {
+        GetRequiredLabels | Where-Object { $_.name -eq $name } | Should -Not -BeNullOrEmpty
+    }
+
+    It "gives every label a colour and a description GitHub accepts" {
+        foreach ($label in GetRequiredLabels) {
+            $label.color | Should -Match '^[0-9a-f]{6}$'
+            $label.description | Should -Not -BeNullOrEmpty
+            $label.description.Length | Should -BeLessOrEqual 100
+        }
+    }
+}
+
+Describe "BuildCompareUrl" {
+    It "pins a fork comparison to both commits inside the fork network" {
+        $url = BuildCompareUrl -targetServerUrl "https://github.com" -upstreamServerUrl "https://github.com" `
+            -repoFullName "jessehouwing/azure-pipelines-tasks" -upstreamFullName "microsoft/azure-pipelines-tasks" `
+            -baseSha "aaa111" -headSha "bbb222" -defaultBranch "master" -isFork $true
+
+        $url | Should -Be "https://github.com/jessehouwing/azure-pipelines-tasks/compare/aaa111...microsoft:bbb222"
+    }
+
+    It "compares a mirror inside the upstream repository, since it is not in the fork network" {
+        $url = BuildCompareUrl -targetServerUrl "https://contoso.ghe.com" -upstreamServerUrl "https://github.com" `
+            -repoFullName "mirrors/actions_checkout" -upstreamFullName "actions/checkout" `
+            -baseSha "aaa111" -headSha "bbb222" -defaultBranch "main" -isFork $false
+
+        $url | Should -Be "https://github.com/actions/checkout/compare/aaa111...bbb222"
+    }
+
+    It "falls back to the commit when the target has no commit yet" {
+        $url = BuildCompareUrl -upstreamServerUrl "https://github.com" -upstreamFullName "actions/checkout" `
+            -headSha "bbb222" -defaultBranch "main" -isFork $false
+
+        $url | Should -Be "https://github.com/actions/checkout/commit/bbb222"
+    }
+
+    It "falls back to the commit list when the upstream head is unknown" {
+        $url = BuildCompareUrl -upstreamServerUrl "https://github.com" -upstreamFullName "actions/checkout" `
+            -defaultBranch "main" -isFork $false
+
+        $url | Should -Be "https://github.com/actions/checkout/commits/main"
+    }
 }
 
 Describe "Approval snapshots" {
@@ -39,6 +90,28 @@ Describe "Approval snapshots" {
 
         ([regex]::Matches($body, "fork-updater-approval")).Count | Should -Be 1
         (ParseApprovalSnapshot -issueBody $body).headSha | Should -Be "def456"
+    }
+
+    It "renders the compare link and shortens the sha in the table" {
+        $snapshot = NewApprovalSnapshot -upstream "microsoft/azure-pipelines-tasks" -defaultBranch "master" `
+            -headSha "8a4b3907a4717738c646d09c16c57617b5c9f48e" -baseSha "aaa111" `
+            -compareUrl "https://github.com/jessehouwing/azure-pipelines-tasks/compare/aaa111...microsoft:8a4b390" `
+            -upstreamUrl "https://github.com" -releaseTags @("v1.0.0")
+
+        $body = FormatApprovalSnapshot -snapshot $snapshot
+
+        # -Match, not -BeLike: a backtick is the escape character in wildcard patterns
+        $body | Should -Match '`master` at `8a4b390`'
+        $body | Should -BeLike '*compare/aaa111...microsoft:8a4b390*'
+        $body | Should -BeLike '*releases/tag/v1.0.0*'
+        $body | Should -Not -Match '`8a4b3907a4717738c646d09c16c57617b5c9f48e`'
+    }
+
+    It "keeps the display fields out of the change comparison" {
+        $approved = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -baseSha "old" -compareUrl "https://example.com/old"
+        $current = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -baseSha "new" -compareUrl "https://example.com/new"
+
+        (CompareApprovalSnapshots -approved $approved -current $current).changed | Should -BeFalse
     }
 
     It "requires a new approval when the default branch moved" {

@@ -79,6 +79,35 @@ function ResolveUpstream {
     return $null
 }
 
+function BuildCompareUrl {
+    param (
+        [string] $targetServerUrl,
+        [string] $upstreamServerUrl,
+        [string] $repoFullName,
+        [string] $upstreamFullName,
+        [string] $baseSha,
+        [string] $headSha,
+        [string] $defaultBranch,
+        [bool] $isFork
+    )
+
+    if ([string]::IsNullOrWhiteSpace($headSha)) {
+        return "$upstreamServerUrl/$upstreamFullName/commits/$defaultBranch"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($baseSha)) {
+        return "$upstreamServerUrl/$upstreamFullName/commit/$headSha"
+    }
+
+    if ($isFork) {
+        $upstreamOwner = ($upstreamFullName -split '/', 2)[0]
+        return "$targetServerUrl/$repoFullName/compare/$baseSha...$($upstreamOwner):$headSha"
+    }
+
+    # a mirror is not in the upstream's fork network, but its commits are, so compare inside the upstream
+    return "$upstreamServerUrl/$upstreamFullName/compare/$baseSha...$headSha"
+}
+
 function ResolveRepoAcrossHosts {
     param (
         [string] $repoFullName,

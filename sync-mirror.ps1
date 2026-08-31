@@ -11,6 +11,8 @@ function CollectApprovalSnapshot {
         [string] $upstream,
         [string] $defaultBranch,
         [string] $headSha,
+        [string] $baseSha,
+        [string] $compareUrl,
         [object] $syncSettings,
         [bool] $isFork
     )
@@ -31,7 +33,7 @@ function CollectApprovalSnapshot {
         }
     }
 
-    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -tags $tags -releaseTags $releaseTags
+    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -tags $tags -releaseTags $releaseTags
 }
 
 function TestIsFloatingTag {

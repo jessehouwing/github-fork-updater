@@ -19,6 +19,7 @@ Watch the demo video here:
 Or follow these steps:
 1. Fork this repository to your own organization.
 1. Enable issue in the forked repository (issues are disabled on the fork by default, since you'd want any issues to be created on the parent repo, not the forked one).
+1. Run the `init-workflow.yml` workflow once to create the labels this tool uses (see below).
 1. Enable the workflow `check-workflow.yml` and allow the schedule to run (GitHub security feature).
 1. Either add a repository secret named `PAT_GITHUB` containing a GitHub Personal Access Token with these scopes: `public_repo, read:org, read:user, repo:status, repo_deployment, issues:write` (see below on why) or use a GitHub App with `GH_AUTOMATION_ID` and `GH_AUTOMATION_PRIVATE_KEY`. Read more info on the differences [here](https://devopsjournal.io/blog/2022/01/03/GitHub-Tokens).
 1. Add configuration for using a GitHub App or a PAT with the Actions variable in your repo called `USE_GITHUB_APP`, value is true or false.
@@ -30,6 +31,17 @@ Or follow these steps:
 
 # Schedule runs
 The scheduled runs are planned at weekdays, at 7 AM.
+
+# init-workflow.yml
+Run this workflow manually once after setting up the repository. It creates the labels the tool uses, with a description explaining what each one means. Running it again is safe: existing labels are updated to the expected colour and description rather than duplicated.
+
+| Label | Meaning |
+|---|---|
+| `update-available` | The upstream repository has changes that are not in this fork or mirror yet |
+| `parent-archived` | The upstream repository has been archived, consider finding an alternative |
+| `update-fork` | Add this label to approve the recorded versions and sync the fork or mirror |
+
+The labels are defined in [labels.ps1](labels.ps1), which is also what the check and update workflows apply, so the two cannot drift apart.
 
 # check-workflow.yml
 The check-workflow will iterate all repositories in the same organization (or user) and find the ones that are forks of another repository (called parent repository). For the forks it will check if there are updates available in the parent repository and if so, create new issues in this repository (GitHubForkUpdater) with a link to verify those changes. 

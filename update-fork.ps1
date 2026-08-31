@@ -134,8 +134,12 @@ function Main {
     $defaultBranch = $resolved.repo.default_branch
     $branchCommit = GetBranchCommit -gitHubHost $upstreamHost -parent $upstream -branchName $defaultBranch
 
+    $repoBranch = if ($repo.default_branch) { $repo.default_branch } else { $defaultBranch }
+    $baseCommit = GetBranchCommit -gitHubHost $targetHost -parent $repo.full_name -branchName $repoBranch
+    $compareUrl = BuildCompareUrl -targetServerUrl $targetHost.ServerUrl -upstreamServerUrl $upstreamHost.ServerUrl -repoFullName $repo.full_name -upstreamFullName $upstream -baseSha $baseCommit.sha -headSha $branchCommit.sha -defaultBranch $defaultBranch -isFork ([bool]$repo.fork)
+
     # only apply what was actually reviewed: re-check the upstream against the versions recorded on the issue
-    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -syncSettings $syncSettings -isFork ([bool]$repo.fork)
+    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -syncSettings $syncSettings -isFork ([bool]$repo.fork)
 
     $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
     $approved = ParseApprovalSnapshot -issueBody $issue.body

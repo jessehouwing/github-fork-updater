@@ -60,10 +60,11 @@ function GetUpstreamState {
 
     $branchCommit = GetBranchCommit -gitHubHost $upstreamHost -parent $upstreamInfo.full_name -branchName $defaultBranch
 
-    $compareUrl = "$($upstreamHost.ServerUrl)/$($upstreamInfo.full_name)/commits/$defaultBranch"
-    if ($repo.fork) {
-        $compareUrl = "$($targetHost.ServerUrl)/$($repo.full_name)/compare/$defaultBranch..$($upstreamInfo.owner.login):$defaultBranch"
-    }
+    # the commit the target is on today, so the compare link keeps showing what was reviewed even after the upstream moves
+    $repoBranch = if ($repo.default_branch) { $repo.default_branch } else { $defaultBranch }
+    $baseCommit = GetBranchCommit -gitHubHost $targetHost -parent $repo.full_name -branchName $repoBranch
+
+    $compareUrl = BuildCompareUrl -targetServerUrl $targetHost.ServerUrl -upstreamServerUrl $upstreamHost.ServerUrl -repoFullName $repo.full_name -upstreamFullName $upstreamInfo.full_name -baseSha $baseCommit.sha -headSha $branchCommit.sha -defaultBranch $defaultBranch -isFork ([bool]$repo.fork)
 
     return [PSCustomObject]@{
         parentUrl       = $upstreamInfo.html_url
@@ -73,6 +74,7 @@ function GetUpstreamState {
         isFork          = [bool]$repo.fork
         defaultBranch   = $defaultBranch
         headSha         = $branchCommit.sha
+        baseSha         = $baseCommit.sha
         lastPushRepo    = $repo.pushed_at
         lastPushParent  = $branchCommit.date
         updateAvailable = ($repo.pushed_at -lt $branchCommit.date)
@@ -164,7 +166,7 @@ function CheckAllReposInOrg {
         if ($repoInfo.updateAvailable -or $repoInfo.parentArchived -or $releasesOutOfSync) {
             Write-Host "Found new updates in the upstream repository [$($repoInfo.parentUrl)], compare the changes with [$($repoInfo.compareUrl)]"
 
-            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -syncSettings $syncSettings -isFork $repoInfo.isFork
+            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -baseSha $repoInfo.baseSha -compareUrl $repoInfo.compareUrl -syncSettings $syncSettings -isFork $repoInfo.isFork
 
             $repoData = [PSCustomObject]@{
                 repoName       = $repo.full_name
