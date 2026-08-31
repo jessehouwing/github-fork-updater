@@ -141,6 +141,8 @@ Set these [custom properties](https://docs.github.com/en/organizations/managing-
 | `upstream-url` | a repository url | _unset_ | Overrides the `org_repo` naming convention |
 | `sync-mode` | `approve`, `auto` | `approve` | `approve` creates an issue and waits for the `update-fork` label, `auto` syncs immediately |
 | `sync-branches` | `default`, `all`, `none` | `default` | Which branches to push to the mirror |
+| `sync-branch-push` | `fast-forward-only`, `try-merge`, `try-rebase`, `use-force` | `fast-forward-only` | How branch changes are pushed or integrated |
+| `sync-tag-push` | `create-only`, `create-or-update` | `create-only` | Whether non-floating tags can be force updated |
 | `sync-floating-tags` | `true`, `false` | `true` | Whether mutable tags like `v1`, `v1.0` and `latest` are force updated |
 | `sync-releases` | `none`, `all`, `immutable` | `none` | Which upstream releases are recreated on the target |
 | `sync-release-assets` | `true`, `false` | `false` | Whether the release attachments are copied along with the release |

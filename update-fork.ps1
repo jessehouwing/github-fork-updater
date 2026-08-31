@@ -44,7 +44,8 @@ $sourceDirectory = "source"
 function UpdateFork {
     param (
         [string] $fork,
-        [object] $gitHubHost
+        [object] $gitHubHost,
+        [object] $syncSettings
     )
 
     $forkUrl = GetForkCloneUrl -fork $fork -gitHubHost $gitHubHost
@@ -67,27 +68,86 @@ function UpdateFork {
 
     # fetch the changes from the parent
     Write-Host "Fetching changes from parent repo"
-    git fetch github $parent.parentDefaultBranch --tags --force
+    git fetch github $parent.parentDefaultBranch --tags
 
     # make sure you are on the right branch
     Write-Host "Pulling all changes from the parent on branch [$($parent.parentDefaultBranch)]"
     git checkout $parent.parentDefaultBranch
 
-    # merge in any changes from the branch
-    Write-Host "Merging changes from parent repo"
-    git merge github/$($parent.parentDefaultBranch) --ff
-
-    # check if there are any merge conflicts
-    $mergeConflict = git status | Select-String "both modified"
-    if ($mergeConflict) {
-        Write-Host "Found merge conflicts, aborting the update"
-        git merge --abort
-        return 1
+    # apply branch changes according to the configured push mode
+    switch ($syncSettings.syncBranchPush) {
+        'fast-forward-only' {
+            Write-Host "Merging changes from parent repo (fast-forward only)"
+            git merge github/$($parent.parentDefaultBranch) --ff-only
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Cannot fast-forward branch [$($parent.parentDefaultBranch)]"
+                return 1
+            }
+            git push origin $parent.parentDefaultBranch
+            if ($LASTEXITCODE -ne 0) { return 1 }
+        }
+        'try-merge' {
+            Write-Host "Merging changes from parent repo"
+            git merge github/$($parent.parentDefaultBranch) --no-edit
+            $mergeConflict = git status | Select-String "both modified"
+            if ($mergeConflict -or $LASTEXITCODE -ne 0) {
+                Write-Host "Found merge conflicts, aborting the update"
+                git merge --abort
+                return 1
+            }
+            git push origin $parent.parentDefaultBranch
+            if ($LASTEXITCODE -ne 0) { return 1 }
+        }
+        'try-rebase' {
+            Write-Host "Rebasing local branch on parent changes"
+            git rebase github/$($parent.parentDefaultBranch)
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Found rebase conflicts, aborting the update"
+                git rebase --abort
+                return 1
+            }
+            git push origin $parent.parentDefaultBranch --force
+            if ($LASTEXITCODE -ne 0) { return 1 }
+        }
+        'use-force' {
+            Write-Host "Resetting branch to parent commit (force)"
+            git reset --hard github/$($parent.parentDefaultBranch)
+            git push origin $parent.parentDefaultBranch --force
+            if ($LASTEXITCODE -ne 0) { return 1 }
+        }
     }
 
-    # push the changes back to your repo
-    Write-Host "Pushing changes back to fork"
-    git push origin $parent.parentDefaultBranch --tags --force
+    # push tags one by one respecting tag push and floating tag settings
+    $tagFailures = @()
+    $tags = git for-each-ref --format="%(refname:short)" refs/tags
+    foreach ($tag in $tags) {
+        if ([string]::IsNullOrWhiteSpace($tag)) {
+            continue
+        }
+        $isFloating = TestIsFloatingTag -tagName $tag
+        if ($isFloating -and -not $syncSettings.syncFloatingTags) {
+            continue
+        }
+        $useForce = ($syncSettings.syncTagPush -eq 'create-or-update') -or ($isFloating -and $syncSettings.syncFloatingTags)
+        if ($useForce) {
+            $pushOutput = git push origin "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
+        }
+        else {
+            $pushOutput = git push origin "refs/tags/$tag`:refs/tags/$tag" 2>&1
+        }
+
+        if ($LASTEXITCODE -ne 0) {
+            $outputText = [string]$pushOutput
+            if ($outputText -notmatch "already exists") {
+                $tagFailures += "Failed to push tag [$tag]: $outputText"
+            }
+        }
+    }
+
+    if ($tagFailures.Count -gt 0) {
+        foreach ($f in $tagFailures) { Write-Warning $f }
+        return 1
+    }
 
     Write-Host "Completed fork update"
 }
@@ -138,8 +198,14 @@ function Main {
     $baseCommit = GetBranchCommit -gitHubHost $targetHost -parent $repo.full_name -branchName $repoBranch
     $compareUrl = BuildCompareUrl -targetServerUrl $targetHost.ServerUrl -upstreamServerUrl $upstreamHost.ServerUrl -repoFullName $repo.full_name -upstreamFullName $upstream -baseSha $baseCommit.sha -headSha $branchCommit.sha -defaultBranch $defaultBranch -isFork ([bool]$repo.fork)
 
+    $compareRepo = if ($repo.fork) { $repo.full_name } else { $upstream }
+    $baseRef = $baseCommit.sha
+    $headRef = if ($repo.fork) { "$($upstreamHost.UserName):$($branchCommit.sha)" } else { $branchCommit.sha }
+    $compareStatus = GetCompareStatus -gitHubHost $targetHost -repoFullName $compareRepo -baseRef $baseRef -headRef $headRef
+    $branchAction = if ($compareStatus) { MapCompareStatus -status $compareStatus.status } else { 'unknown' }
+
     # only apply what was actually reviewed: re-check the upstream against the versions recorded on the issue
-    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -targetHost $targetHost -repoFullName $repo.full_name -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -syncSettings $syncSettings
+    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -targetHost $targetHost -repoFullName $repo.full_name -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -branchAction $branchAction -syncSettings $syncSettings
 
     $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
     $approved = ParseApprovalSnapshot -issueBody $issue.body
@@ -153,16 +219,27 @@ function Main {
 
         $message = ":warning: The update was **not** applied. The upstream repository changed since this issue was approved:`r`n- $($comparison.differences -join "`r`n- ")`r`n`r`nReview the incoming changes again and re-apply the **update-fork** label to approve the new version."
         AddCommentToIssue -number $issueId -message $message -repoName $issuesRepository -gitHubHost $targetHost
-        return 0
+        return 1
+    }
+
+    $feasibility = TestCanApplyUpdate -snapshot $currentSnapshot -syncSettings $syncSettings -targetHost $targetHost -repoFullName $fork
+    if (-not $feasibility.canApply) {
+        Write-Host "The desired changes cannot be made with current repository settings"
+
+        RemoveLabelFromIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId -label "update-fork"
+
+        $message = ":warning: The update was **not** applied. The desired changes cannot be made with the repository's current sync settings:`r`n- $($feasibility.blockers -join "`r`n- ")`r`n`r`nAdjust the repository custom properties (such as **sync-branch-push** or **sync-tag-push**) and re-apply the **update-fork** label."
+        AddCommentToIssue -number $issueId -message $message -repoName $issuesRepository -gitHubHost $targetHost
+        return 1
     }
 
     AddCommentToIssue -number $issueId -message "Updating the fork with the approved changes from the parent repository through [update-workflow]($workflowRunUrl)." -repoName $issuesRepository -gitHubHost $targetHost
 
     if ($repo.fork) {
-        $forkResult = UpdateFork -fork $fork -gitHubHost $targetHost
+        $forkResult = UpdateFork -fork $fork -gitHubHost $targetHost -syncSettings $syncSettings
         if ($forkResult -eq 1) {
             Write-Host "Error with the update of the fork, halting execution"
-            AddCommentToIssue -number $issueId -message ":warning: Found merge conflicts, aborting the update" -repoName $issuesRepository -gitHubHost $targetHost
+            AddCommentToIssue -number $issueId -message ":warning: Error updating the fork, aborting the update" -repoName $issuesRepository -gitHubHost $targetHost
             return 1
         }
 
@@ -171,14 +248,22 @@ function Main {
         Remove-Item -Force -Recurse $sourceDirectory
 
         # the merge pushes the branch and its tags, releases still have to be recreated through the api
-        $null = SyncReleases -mirror $fork -upstream $upstream -sourceHost $upstreamHost -targetHost $targetHost -syncSettings $syncSettings
+        $releaseResult = SyncReleases -mirror $fork -upstream $upstream -sourceHost $upstreamHost -targetHost $targetHost -syncSettings $syncSettings
+        if ($null -ne $releaseResult -and -not $releaseResult.success) {
+            AddCommentToIssue -number $issueId -message ":warning: Some releases could not be synced:`r`n- $($releaseResult.failures -join "`r`n- ")" -repoName $issuesRepository -gitHubHost $targetHost
+            return 1
+        }
     }
     else {
         $refResult = SyncMirrorRefs -mirror $fork -upstream $upstream -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings
-        $null = SyncReleases -mirror $fork -upstream $upstream -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings
+        $releaseResult = SyncReleases -mirror $fork -upstream $upstream -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings
 
         if (-not $refResult.success) {
             AddCommentToIssue -number $issueId -message ":warning: Some references could not be synced:`r`n- $($refResult.failures -join "`r`n- ")" -repoName $issuesRepository -gitHubHost $targetHost
+            return 1
+        }
+        if ($null -ne $releaseResult -and -not $releaseResult.success) {
+            AddCommentToIssue -number $issueId -message ":warning: Some releases could not be synced:`r`n- $($releaseResult.failures -join "`r`n- ")" -repoName $issuesRepository -gitHubHost $targetHost
             return 1
         }
     }

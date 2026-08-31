@@ -366,6 +366,8 @@ Describe "GetSyncSettings" {
         $settings = GetSyncSettings -properties @{} -repoFullName "org/repo"
         $settings.syncMode | Should -Be "approve"
         $settings.syncBranches | Should -Be "default"
+        $settings.syncBranchPush | Should -Be "fast-forward-only"
+        $settings.syncTagPush | Should -Be "create-only"
         $settings.syncFloatingTags | Should -BeTrue
         $settings.syncReleases | Should -Be "none"
         $settings.syncReleaseAssets | Should -BeFalse
@@ -377,6 +379,8 @@ Describe "GetSyncSettings" {
         $settings = GetSyncSettings -properties @{
             'sync-mode'                    = 'auto'
             'sync-branches'                = 'all'
+            'sync-branch-push'             = 'try-merge'
+            'sync-tag-push'                = 'create-or-update'
             'sync-floating-tags'           = 'false'
             'sync-releases'                = 'immutable'
             'sync-release-assets'          = 'true'
@@ -386,6 +390,8 @@ Describe "GetSyncSettings" {
 
         $settings.syncMode | Should -Be "auto"
         $settings.syncBranches | Should -Be "all"
+        $settings.syncBranchPush | Should -Be "try-merge"
+        $settings.syncTagPush | Should -Be "create-or-update"
         $settings.syncFloatingTags | Should -BeFalse
         $settings.syncReleases | Should -Be "immutable"
         $settings.syncReleaseAssets | Should -BeTrue
@@ -393,9 +399,163 @@ Describe "GetSyncSettings" {
         $settings.upstreamUrl | Should -Be "https://github.com/actions/checkout"
     }
 
+    It "supports aliases for push properties" {
+        $settings = GetSyncSettings -properties @{
+            'sync-branches-push' = 'try-rebase'
+            'sync-tags-push'     = 'create-or-update'
+        } -repoFullName "org/repo"
+
+        $settings.syncBranchPush | Should -Be "try-rebase"
+        $settings.syncTagPush | Should -Be "create-or-update"
+    }
+
     It "falls back to the default for an unsupported value" {
-        $settings = GetSyncSettings -properties @{ 'sync-releases' = 'everything' } -repoFullName "org/repo" -WarningAction SilentlyContinue
+        $settings = GetSyncSettings -properties @{
+            'sync-releases'    = 'everything'
+            'sync-branch-push' = 'invalid-mode'
+            'sync-tag-push'    = 'invalid-tag-mode'
+        } -repoFullName "org/repo" -WarningAction SilentlyContinue
+
         $settings.syncReleases | Should -Be "none"
+        $settings.syncBranchPush | Should -Be "fast-forward-only"
+        $settings.syncTagPush | Should -Be "create-only"
+    }
+}
+
+Describe "TestCanApplyUpdate" {
+    It "allows an update when the branch fast-forwards cleanly" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1.0.0"; action = "new" })
+        }
+        $settings = GetSyncSettings -properties @{} -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeTrue
+        $result.blockers.Count | Should -Be 0
+    }
+
+    It "blocks an update when the branch diverged and sync-branch-push is fast-forward-only" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "force push required"
+            tagList       = @()
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-branch-push' = 'fast-forward-only' } -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeFalse
+        $result.blockers[0] | Should -BeLike "*requires a force push*fast-forward-only*"
+    }
+
+    It "allows an update on a diverged branch when sync-branch-push is try-merge, try-rebase, or use-force" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "force push required"
+            tagList       = @()
+        }
+
+        foreach ($mode in @('try-merge', 'try-rebase', 'use-force')) {
+            $settings = GetSyncSettings -properties @{ 'sync-branch-push' = $mode } -repoFullName "org/repo"
+            $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+            $result.canApply | Should -BeTrue
+        }
+    }
+
+    It "ignores a diverged branch when sync-branches is set to none" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "force push required"
+            tagList       = @()
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-branches' = 'none'; 'sync-branch-push' = 'fast-forward-only' } -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeTrue
+    }
+
+    It "blocks an update when a pinned tag requires a force push and sync-tag-push is create-only" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1.2.3"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-tag-push' = 'create-only' } -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeFalse
+        $result.blockers[0] | Should -BeLike "*v1.2.3*sync-tag-push*create-only*"
+    }
+
+    It "allows an update when a pinned tag requires force push and sync-tag-push is create-or-update" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1.2.3"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-tag-push' = 'create-or-update' } -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeTrue
+    }
+
+    It "allows a floating tag force update when sync-floating-tags is true" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-floating-tags' = 'true'; 'sync-tag-push' = 'create-only' } -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeTrue
+    }
+
+    It "blocks a floating tag force update when sync-floating-tags is false and sync-tag-push is create-only" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-floating-tags' = 'false'; 'sync-tag-push' = 'create-only' } -repoFullName "org/repo"
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings
+        $result.canApply | Should -BeFalse
+    }
+
+    It "blocks an update when a tag on the target repository is protected by an immutable release" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1.0.0"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-tag-push' = 'create-or-update' } -repoFullName "org/repo"
+        $mockHost = [PSCustomObject]@{ ServerUrl = "https://github.com"; ApiUrl = "https://api.github.com" }
+
+        Mock TestReleaseImmutability { return $true }
+        Mock CallWebRequest { return @() }
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings -targetHost $mockHost -repoFullName "org/repo"
+        $result.canApply | Should -BeFalse
+        $result.blockers[0] | Should -BeLike "*v1.0.0*protected by an immutable release*"
+    }
+
+    It "blocks an update when a tag matches a tag protection rule on the target repository" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1.0.0"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-tag-push' = 'create-or-update' } -repoFullName "org/repo"
+        $mockHost = [PSCustomObject]@{ ServerUrl = "https://github.com"; ApiUrl = "https://api.github.com" }
+
+        Mock TestReleaseImmutability { return $false }
+        Mock CallWebRequest { return @([PSCustomObject]@{ id = 1; pattern = "v1.*" }) }
+
+        $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings -targetHost $mockHost -repoFullName "org/repo"
+        $result.canApply | Should -BeFalse
+        $result.blockers[0] | Should -BeLike "*v1.0.0*tag protection rule*v1.*"
     }
 }
 

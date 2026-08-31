@@ -44,6 +44,66 @@ function TestIsFloatingTag {
     return $tagName -match $script:FloatingTagPattern
 }
 
+function TestCanApplyUpdate {
+    param (
+        [object] $snapshot,
+        [object] $syncSettings,
+        [object] $targetHost = $null,
+        [string] $repoFullName = $null
+    )
+
+    $blockers = @()
+
+    if ($syncSettings.syncBranches -ne 'none') {
+        if ($snapshot.branchAction -eq 'force push required' -and $syncSettings.syncBranchPush -eq 'fast-forward-only') {
+            $blockers += "The default branch [$($snapshot.defaultBranch)] has diverged from upstream and requires a force push, but repository property [sync-branch-push] is set to [fast-forward-only]."
+        }
+    }
+
+    $allForcedTags = @($snapshot.tagList | Where-Object { $_.action -eq 'force push required' })
+
+    if ($allForcedTags.Count -gt 0) {
+        $blockedBySetting = @($allForcedTags | Where-Object {
+            $syncSettings.syncTagPush -ne 'create-or-update' -and
+            (-not (TestIsFloatingTag -tagName $_.name) -or -not $syncSettings.syncFloatingTags)
+        })
+
+        if ($blockedBySetting.Count -gt 0) {
+            $tagNames = ($blockedBySetting | ForEach-Object { $_.name }) -join ', '
+            $blockers += "Tag(s) [$tagNames] have changed upstream and cannot be updated because repository property [sync-tag-push] is set to [create-only]."
+        }
+
+        # Check if target repository has immutable releases or tag protection rules locking the tag
+        if ($targetHost -and $repoFullName) {
+            foreach ($tag in $allForcedTags) {
+                if (TestReleaseImmutability -gitHubHost $targetHost -repoFullName $repoFullName -tagName $tag.name) {
+                    $blockers += "Tag [$($tag.name)] is protected by an immutable release on [$repoFullName] and cannot be updated."
+                }
+            }
+
+            $tagProtections = CallWebRequest -url "repos/$repoFullName/tags/protection" -gitHubHost $targetHost
+            if ($tagProtections -and $tagProtections.Count -gt 0) {
+                foreach ($tag in $allForcedTags) {
+                    foreach ($rule in $tagProtections) {
+                        if ($rule.pattern) {
+                            $pattern = '^' + [regex]::Escape($rule.pattern).Replace('\*', '.*') + '$'
+                            if ($tag.name -match $pattern) {
+                                $blockers += "Tag [$($tag.name)] is protected by tag protection rule [$($rule.pattern)] on [$repoFullName] and cannot be updated."
+                                break
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        canApply = ($blockers.Count -eq 0)
+        blockers = $blockers
+    }
+}
+
 function TestImmutableReleaseError {
     param (
         $errorRecord
@@ -249,50 +309,108 @@ function SyncMirrorRefs {
     $upstreamCloneUrl = GetCloneUrl -gitHubHost $sourceHost -repoFullName $upstream
     $targetCloneUrl = GetCloneUrl -gitHubHost $targetHost -repoFullName $mirror
 
-    Write-Host "Cloning upstream [$upstream] to sync into mirror [$mirror]"
+    Write-Host "Cloning to sync mirror [$mirror] from upstream [$upstream]"
 
     if (Test-Path $workingDirectory) {
         Remove-Item -Force -Recurse $workingDirectory
     }
 
-    git clone --bare --quiet $upstreamCloneUrl $workingDirectory
-    if ($LASTEXITCODE -ne 0) {
-        return [PSCustomObject]@{ success = $false; failures = @("Failed to clone upstream [$upstream]") }
-    }
-
-    $previousLocation = Get-Location
-    Set-Location $workingDirectory
-
     $failures = @()
+    $previousLocation = Get-Location
 
     try {
-        git remote add target $targetCloneUrl
-
-        $defaultBranch = (git symbolic-ref --short HEAD)
-
-        switch ($syncSettings.syncBranches) {
-            'none' {
-                Write-Host "Skipping branch sync for [$mirror], sync-branches is set to [none]"
+        if ($syncSettings.syncBranchPush -in @('try-merge', 'try-rebase')) {
+            # merging or rebasing requires a working tree with the target repository checked out
+            git clone --quiet $targetCloneUrl $workingDirectory
+            if ($LASTEXITCODE -ne 0) {
+                return [PSCustomObject]@{ success = $false; failures = @("Failed to clone mirror repository [$mirror]") }
             }
-            'all' {
-                Write-Host "Pushing all branches to [$mirror]"
-                git push target "refs/heads/*:refs/heads/*" --force --prune
-                if ($LASTEXITCODE -ne 0) {
-                    $failures += "Failed to push branches to [$mirror]"
+            Set-Location $workingDirectory
+
+            git remote add upstream $upstreamCloneUrl
+            $defaultBranch = (git symbolic-ref --short HEAD)
+            git fetch upstream $defaultBranch --tags --quiet
+
+            if ($syncSettings.syncBranches -ne 'none') {
+                if ($syncSettings.syncBranchPush -eq 'try-merge') {
+                    Write-Host "Merging changes from upstream [$upstream] into branch [$defaultBranch]"
+                    git merge upstream/$defaultBranch --no-edit
+                    $mergeConflict = git status | Select-String "both modified"
+                    if ($mergeConflict -or $LASTEXITCODE -ne 0) {
+                        Write-Host "Found merge conflicts on [$mirror], aborting the merge"
+                        git merge --abort
+                        $failures += "Merge conflict while merging upstream into branch [$defaultBranch] on [$mirror]"
+                    }
+                    else {
+                        git push origin $defaultBranch
+                        if ($LASTEXITCODE -ne 0) {
+                            $failures += "Failed to push merged branch [$defaultBranch] to [$mirror]"
+                        }
+                    }
+                }
+                elseif ($syncSettings.syncBranchPush -eq 'try-rebase') {
+                    Write-Host "Rebasing branch [$defaultBranch] on upstream [$upstream]"
+                    git rebase upstream/$defaultBranch
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Host "Found rebase conflicts on [$mirror], aborting the rebase"
+                        git rebase --abort
+                        $failures += "Rebase conflict while rebasing branch [$defaultBranch] on [$mirror] onto upstream"
+                    }
+                    else {
+                        git push origin $defaultBranch --force
+                        if ($LASTEXITCODE -ne 0) {
+                            $failures += "Failed to push rebased branch [$defaultBranch] to [$mirror]"
+                        }
+                    }
                 }
             }
-            default {
-                Write-Host "Pushing default branch [$defaultBranch] to [$mirror]"
-                git push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch" --force
-                if ($LASTEXITCODE -ne 0) {
-                    $failures += "Failed to push branch [$defaultBranch] to [$mirror]"
+        }
+        else {
+            git clone --bare --quiet $upstreamCloneUrl $workingDirectory
+            if ($LASTEXITCODE -ne 0) {
+                return [PSCustomObject]@{ success = $false; failures = @("Failed to clone upstream [$upstream]") }
+            }
+            Set-Location $workingDirectory
+
+            git remote add target $targetCloneUrl
+            $defaultBranch = (git symbolic-ref --short HEAD)
+
+            $useForce = ($syncSettings.syncBranchPush -eq 'use-force')
+
+            switch ($syncSettings.syncBranches) {
+                'none' {
+                    Write-Host "Skipping branch sync for [$mirror], sync-branches is set to [none]"
+                }
+                'all' {
+                    Write-Host "Pushing all branches to [$mirror]"
+                    if ($useForce) {
+                        git push target "refs/heads/*:refs/heads/*" --force --prune
+                    }
+                    else {
+                        git push target "refs/heads/*:refs/heads/*" --prune
+                    }
+                    if ($LASTEXITCODE -ne 0) {
+                        $failures += "Failed to push branches to [$mirror]"
+                    }
+                }
+                default {
+                    Write-Host "Pushing default branch [$defaultBranch] to [$mirror]"
+                    if ($useForce) {
+                        git push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch" --force
+                    }
+                    else {
+                        git push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch"
+                    }
+                    if ($LASTEXITCODE -ne 0) {
+                        $failures += "Failed to push branch [$defaultBranch] to [$mirror]"
+                    }
                 }
             }
         }
 
-        # push tags one by one: a bulk push fails atomically when a single tag is protected
-        # by an immutable release on the target
+        # push tags one by one
         $tags = git for-each-ref --format="%(refname:short)" refs/tags
+        $targetRemote = if ($syncSettings.syncBranchPush -in @('try-merge', 'try-rebase')) { "origin" } else { "target" }
         foreach ($tag in $tags) {
             if ([string]::IsNullOrWhiteSpace($tag)) {
                 continue
@@ -304,16 +422,16 @@ function SyncMirrorRefs {
                 continue
             }
 
-            if ($isFloating) {
-                $pushOutput = git push target "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
+            $useTagForce = ($syncSettings.syncTagPush -eq 'create-or-update') -or ($isFloating -and $syncSettings.syncFloatingTags)
+            if ($useTagForce) {
+                $pushOutput = git push $targetRemote "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
             }
             else {
-                $pushOutput = git push target "refs/tags/$tag`:refs/tags/$tag" 2>&1
+                $pushOutput = git push $targetRemote "refs/tags/$tag`:refs/tags/$tag" 2>&1
             }
 
             if ($LASTEXITCODE -ne 0) {
                 $outputText = [string]$pushOutput
-                # a pinned tag that already exists on the target is expected, not an error
                 if ($outputText -match "already exists" -or $outputText -match "non-fast-forward" -or $outputText -match "immutable") {
                     Write-Debug "Tag [$tag] was not updated on [$mirror]: $outputText"
                 }
@@ -358,6 +476,7 @@ function SyncReleases {
 
     $created = 0
     $skipped = 0
+    $releaseFailures = @()
 
     $needsAssets = ($syncSettings.syncReleaseAssets -or $syncSettings.verifyUpstreamAttestations)
 
@@ -440,7 +559,9 @@ function SyncReleases {
                 $skipped++
             }
             else {
-                Write-Warning "Failed to create release [$($release.tagName)] on [$mirror]: $($_.Exception.Message)"
+                $errorMsg = "Failed to create release [$($release.tagName)] on [$mirror]: $($_.Exception.Message)"
+                Write-Warning $errorMsg
+                $releaseFailures += $errorMsg
             }
         }
         finally {
@@ -451,5 +572,10 @@ function SyncReleases {
     }
 
     Write-Host "Release sync for [$mirror] created [$created] releases and skipped [$skipped]"
-    return [PSCustomObject]@{ success = $true; created = $created; skipped = $skipped }
+    return [PSCustomObject]@{
+        success  = ($releaseFailures.Count -eq 0)
+        created  = $created
+        skipped  = $skipped
+        failures = $releaseFailures
+    }
 }

@@ -4,6 +4,8 @@ $script:SyncSettingDefaults = @{
     'upstream-url'                 = $null
     'sync-mode'                    = 'approve'
     'sync-branches'                = 'default'
+    'sync-branch-push'             = 'fast-forward-only'
+    'sync-tag-push'                = 'create-only'
     'sync-floating-tags'           = 'true'
     'sync-releases'                = 'none'
     'sync-release-assets'          = 'false'
@@ -13,6 +15,8 @@ $script:SyncSettingDefaults = @{
 $script:SyncSettingAllowedValues = @{
     'sync-mode'                    = @('approve', 'auto')
     'sync-branches'                = @('default', 'all', 'none')
+    'sync-branch-push'             = @('fast-forward-only', 'try-merge', 'try-rebase', 'use-force')
+    'sync-tag-push'                = @('create-only', 'create-or-update')
     'sync-floating-tags'           = @('true', 'false')
     'sync-releases'                = @('none', 'all', 'immutable')
     'sync-release-assets'          = @('true', 'false')
@@ -47,6 +51,14 @@ function GetSyncSettings {
         [string] $repoFullName
     )
 
+    # support aliases for property names
+    if ($properties.ContainsKey('sync-branches-push') -and -not $properties.ContainsKey('sync-branch-push')) {
+        $properties['sync-branch-push'] = $properties['sync-branches-push']
+    }
+    if ($properties.ContainsKey('sync-tags-push') -and -not $properties.ContainsKey('sync-tag-push')) {
+        $properties['sync-tag-push'] = $properties['sync-tags-push']
+    }
+
     $resolved = @{}
 
     foreach ($key in $script:SyncSettingDefaults.Keys) {
@@ -71,6 +83,8 @@ function GetSyncSettings {
         upstreamUrl                = $resolved['upstream-url']
         syncMode                   = $resolved['sync-mode']
         syncBranches               = $resolved['sync-branches']
+        syncBranchPush             = $resolved['sync-branch-push']
+        syncTagPush                = $resolved['sync-tag-push']
         syncFloatingTags           = ($resolved['sync-floating-tags'] -eq 'true')
         syncReleases               = $resolved['sync-releases']
         syncReleaseAssets          = ($resolved['sync-release-assets'] -eq 'true')
