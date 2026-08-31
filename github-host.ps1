@@ -56,6 +56,14 @@ function CreateGitHubHost {
 
     $urls = ResolveGitHubHostUrls -serverUrl $serverUrl
 
+    # the Actions token only authenticates against the host the workflow itself runs on
+    if ([string]::IsNullOrWhiteSpace($token) -and -not [string]::IsNullOrWhiteSpace($env:GITHUB_TOKEN) -and -not [string]::IsNullOrWhiteSpace($env:GITHUB_SERVER_URL)) {
+        if ((ResolveGitHubHostUrls -serverUrl $env:GITHUB_SERVER_URL).ServerUrl -eq $urls.ServerUrl) {
+            Write-Debug "No token supplied for [$($urls.ServerUrl)], falling back to the Actions token"
+            $token = $env:GITHUB_TOKEN
+        }
+    }
+
     return [PSCustomObject]@{
         ServerUrl      = $urls.ServerUrl
         ApiUrl         = $urls.ApiUrl

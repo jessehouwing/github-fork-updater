@@ -92,6 +92,47 @@ Describe "Approval snapshots" {
     }
 }
 
+Describe "CreateGitHubHost" {
+    BeforeEach {
+        $script:previousToken = $env:GITHUB_TOKEN
+        $script:previousServer = $env:GITHUB_SERVER_URL
+        $env:GITHUB_TOKEN = "actions-token"
+    }
+
+    AfterEach {
+        $env:GITHUB_TOKEN = $script:previousToken
+        $env:GITHUB_SERVER_URL = $script:previousServer
+    }
+
+    It "uses the supplied token as-is" {
+        $env:GITHUB_SERVER_URL = "https://github.com"
+
+        (CreateGitHubHost -serverUrl "https://github.com" -token "explicit").Token | Should -Be "explicit"
+    }
+
+    It "falls back to the Actions token when talking to the host it runs on" {
+        $env:GITHUB_SERVER_URL = "https://contoso.ghe.com"
+
+        $result = CreateGitHubHost -serverUrl "https://contoso.ghe.com"
+        $result.Token | Should -Be "actions-token"
+        $result.HasToken | Should -BeTrue
+    }
+
+    It "does not use the Actions token for another host" {
+        $env:GITHUB_SERVER_URL = "https://contoso.ghe.com"
+
+        $result = CreateGitHubHost -serverUrl "https://github.com"
+        $result.Token | Should -BeNullOrEmpty
+        $result.HasToken | Should -BeFalse
+    }
+
+    It "falls back to the Actions token for public GitHub when running on public GitHub" {
+        $env:GITHUB_SERVER_URL = "https://github.com"
+
+        (CreateGitHubHost -serverUrl "https://github.com").Token | Should -Be "actions-token"
+    }
+}
+
 Describe "ResolveGitHubHostUrls" {
     It "uses the api.github.com endpoints for public GitHub" {
         $result = ResolveGitHubHostUrls -serverUrl "https://github.com"

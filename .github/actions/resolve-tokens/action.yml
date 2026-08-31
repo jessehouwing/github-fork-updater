@@ -69,6 +69,9 @@ outputs:
   source-is-target:
     description: Whether the target host is public GitHub, so both sides can share one token
     value: ${{ steps.urls.outputs.source-is-target }}
+  target-is-current-host:
+    description: Whether the target host is the host this workflow runs on
+    value: ${{ steps.urls.outputs.target-is-current-host }}
 
 runs:
   using: composite
@@ -88,6 +91,11 @@ runs:
       "target-server-url=$($urls.ServerUrl)" >> $env:GITHUB_OUTPUT
       # when the target already is public GitHub there is no second host to authenticate against
       "source-is-target=$($urls.IsPublicGitHub.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      # the Actions token only authenticates against the host the workflow itself runs on
+      $current = ResolveGitHubHostUrls -serverUrl $env:GITHUB_SERVER_URL
+      "target-is-current-host=$(($current.ServerUrl -eq $urls.ServerUrl).ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      "running-on-public=$($current.IsPublicGitHub.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
 
   - uses: actions/create-github-app-token@v3.2.0 # v3.2.0
     name: Get token from the GitHub App on the target host
@@ -117,16 +125,25 @@ runs:
       target_app_token: ${{ steps.target-app-token.outputs.token }}
       source_app_token: ${{ steps.public-app-token.outputs.token }}
       source_is_target: ${{ steps.urls.outputs.source-is-target }}
+      target_is_current_host: ${{ steps.urls.outputs.target-is-current-host }}
+      running_on_public: ${{ steps.urls.outputs.running-on-public }}
       source_required: ${{ inputs.source-token-required }}
       pat: ${{ inputs.pat }}
       public_pat: ${{ inputs.public-pat }}
+      actions_token: ${{ github.token }}
     run: |
       if [ -n "$target_app_token" ]; then
         target_token="$target_app_token"
         echo "Using the GitHub App token for the target host"
-      else
+      elif [ -n "$pat" ]; then
         target_token="$pat"
         echo "Using the fallback personal access token for the target host"
+      elif [ "$target_is_current_host" = "true" ]; then
+        target_token="$actions_token"
+        echo "Using the Actions token for the target host, it is the host this workflow runs on"
+      else
+        target_token=""
+        echo "::warning::No credentials for the target host, API calls will be anonymous"
       fi
 
       if [ "$source_required" != "true" ]; then
@@ -141,6 +158,9 @@ runs:
       elif [ -n "$public_pat" ]; then
         source_token="$public_pat"
         echo "Using the fallback personal access token for public GitHub"
+      elif [ "$running_on_public" = "true" ]; then
+        source_token="$actions_token"
+        echo "Using the Actions token for public GitHub, it is the host this workflow runs on"
       else
         source_token="$target_token"
         echo "No separate credentials for public GitHub, falling back to the target token"
