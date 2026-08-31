@@ -280,6 +280,11 @@ function CloseIssue {
     Write-Host "Closing issue with number [$number] in repository [$issuesRepositoryName]"
     $result = CallWebRequest -url "repos/$issuesRepositoryName/issues/$number" -verbToUse "POST" -body $data -gitHubHost $gitHubHost
 
+    if ($null -eq $result) {
+        Write-Warning "Could not close issue [$number] in repository [$issuesRepositoryName]"
+        return
+    }
+
     Write-Host "Issue has been closed and can be found at this url: ($($result.html_url))"
 }
 
@@ -303,6 +308,11 @@ function CreateNewIssueForRepo {
 
     Write-Host "Creating a new issue with title [$title] in repository [$issuesRepositoryName]"
     $result = CallWebRequest -url "repos/$issuesRepositoryName/issues" -verbToUse "POST" -body $data -gitHubHost $gitHubHost
+
+    if ($null -eq $result) {
+        Write-Warning "Could not create the issue with title [$title] in repository [$issuesRepositoryName]"
+        return
+    }
 
     Write-Host "Issue has been created and can be found at this url: ($($result.html_url))"
 }

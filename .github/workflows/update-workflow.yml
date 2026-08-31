@@ -14,6 +14,8 @@ jobs:
     permissions:
       contents: write
       actions: write
+      # needed to comment on, relabel and close the approval issue
+      issues: write
     steps:
     - name: Harden the runner (Audit all outbound calls)
       uses: step-security/harden-runner@v2.20.0

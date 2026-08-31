@@ -15,6 +15,10 @@ permissions:
 jobs:
   check-for-updates:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # needed to raise the issues for the repositories that have updates available
+      issues: write
     outputs:
       update: ${{steps.update_step.outputs.update}}
 
