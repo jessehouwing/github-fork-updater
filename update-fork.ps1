@@ -139,7 +139,7 @@ function Main {
     $compareUrl = BuildCompareUrl -targetServerUrl $targetHost.ServerUrl -upstreamServerUrl $upstreamHost.ServerUrl -repoFullName $repo.full_name -upstreamFullName $upstream -baseSha $baseCommit.sha -headSha $branchCommit.sha -defaultBranch $defaultBranch -isFork ([bool]$repo.fork)
 
     # only apply what was actually reviewed: re-check the upstream against the versions recorded on the issue
-    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -syncSettings $syncSettings -isFork ([bool]$repo.fork)
+    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -syncSettings $syncSettings
 
     $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
     $approved = ParseApprovalSnapshot -issueBody $issue.body
@@ -169,6 +169,9 @@ function Main {
         Write-Host "Cleaning up"
         Set-Location ..
         Remove-Item -Force -Recurse $sourceDirectory
+
+        # the merge pushes the branch and its tags, releases still have to be recreated through the api
+        $null = SyncReleases -mirror $fork -upstream $upstream -sourceHost $upstreamHost -targetHost $targetHost -syncSettings $syncSettings
     }
     else {
         $refResult = SyncMirrorRefs -mirror $fork -upstream $upstream -sourceHost $sourceHost -targetHost $targetHost -syncSettings $syncSettings

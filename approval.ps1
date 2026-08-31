@@ -28,6 +28,7 @@ function NewApprovalSnapshot {
         [string] $baseSha,
         [string] $compareUrl,
         [string] $upstreamUrl,
+        [string] $releaseMode = "none",
         [object[]] $tags = @(),
         [string[]] $releaseTags = @()
     )
@@ -35,7 +36,7 @@ function NewApprovalSnapshot {
     $tagEntries = @(@($tags) | ForEach-Object { "$($_.name)@$($_.sha)" })
     $sortedReleaseTags = @(@($releaseTags) | Sort-Object)
 
-    # baseSha, compareUrl and upstreamUrl are only used to render the issue, they are never compared
+    # baseSha, compareUrl, upstreamUrl and releaseMode are only used to render the issue, they are never compared
     return [PSCustomObject]@{
         upstream       = $upstream
         defaultBranch  = $defaultBranch
@@ -43,6 +44,7 @@ function NewApprovalSnapshot {
         baseSha        = $baseSha
         compareUrl     = $compareUrl
         upstreamUrl    = $upstreamUrl
+        releaseMode    = $releaseMode
         tagCount       = $tagEntries.Count
         tagsDigest     = GetContentDigest -values $tagEntries
         releaseTags    = $sortedReleaseTags
@@ -104,6 +106,12 @@ function FormatApprovalSnapshot {
             $releases = @($releases | ForEach-Object { "[$_]($($snapshot.upstreamUrl)/$($snapshot.upstream)/releases/tag/$([uri]::EscapeDataString($_)))" })
         }
         $lines += "| Releases | $($releases -join ', ') |"
+    }
+    elseif ($snapshot.releaseMode -eq 'none') {
+        $lines += "| Releases | not synced, set the ``sync-releases`` custom property to change that |"
+    }
+    else {
+        $lines += "| Releases | none matched ``sync-releases: $($snapshot.releaseMode)`` |"
     }
 
     $lines += ""

@@ -142,7 +142,7 @@ Set these [custom properties](https://docs.github.com/en/organizations/managing-
 | `sync-mode` | `approve`, `auto` | `approve` | `approve` creates an issue and waits for the `update-fork` label, `auto` syncs immediately |
 | `sync-branches` | `default`, `all`, `none` | `default` | Which branches to push to the mirror |
 | `sync-floating-tags` | `true`, `false` | `true` | Whether mutable tags like `v1`, `v1.0` and `latest` are force updated |
-| `sync-releases` | `none`, `all`, `immutable` | `none` | Which upstream releases are recreated on the mirror |
+| `sync-releases` | `none`, `all`, `immutable` | `none` | Which upstream releases are recreated on the target |
 | `sync-release-assets` | `true`, `false` | `false` | Whether the release attachments are copied along with the release |
 | `verify-upstream-attestations` | `true`, `false` | `false` | Verify the upstream artifact attestations before recreating a release |
 
@@ -150,6 +150,8 @@ Mirrors are synced with a bare clone of the upstream that is pushed to the mirro
 
 ## Immutable releases
 With `sync-releases: immutable` only releases that GitHub reports as immutable are recreated on the mirror, with `sync-releases: all` every published (non draft) release is recreated. Releases are created as published, which makes them immutable when [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) are enabled on the target.
+
+This applies to real forks as well as mirrors. Merging a fork pushes the branch and its tags, but releases are separate objects that only exist through the API, so they are never copied unless you set `sync-releases`. The approval table on the issue says so explicitly, so it is clear whether releases are part of what you are approving.
 
 ## Release assets
 Set `sync-release-assets: true` to copy the release attachments as well. The release is then created as a draft, the assets are uploaded, and only after that the release is published. That ordering matters: publishing is what seals an immutable release, so a release published before its assets are uploaded would be sealed without them.

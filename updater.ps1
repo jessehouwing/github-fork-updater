@@ -71,6 +71,7 @@ function GetUpstreamState {
         parentArchived  = $upstreamInfo.archived
         upstreamName    = $upstreamInfo.full_name
         upstreamHost    = $upstreamHost
+        repoUrl         = $repo.html_url
         isFork          = [bool]$repo.fork
         defaultBranch   = $defaultBranch
         headSha         = $branchCommit.sha
@@ -166,10 +167,11 @@ function CheckAllReposInOrg {
         if ($repoInfo.updateAvailable -or $repoInfo.parentArchived -or $releasesOutOfSync) {
             Write-Host "Found new updates in the upstream repository [$($repoInfo.parentUrl)], compare the changes with [$($repoInfo.compareUrl)]"
 
-            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -baseSha $repoInfo.baseSha -compareUrl $repoInfo.compareUrl -syncSettings $syncSettings -isFork $repoInfo.isFork
+            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -baseSha $repoInfo.baseSha -compareUrl $repoInfo.compareUrl -syncSettings $syncSettings
 
             $repoData = [PSCustomObject]@{
                 repoName       = $repo.full_name
+                repoUrl        = $repoInfo.repoUrl
                 parentArchived = $repoInfo.parentArchived
                 parentUrl      = $repoInfo.parentUrl
                 compareUrl     = $repoInfo.compareUrl
@@ -202,13 +204,16 @@ function CreateIssueFor {
     )
 
     $labels = ""
+    $upstreamLink = "**[$($repoInfo.upstreamName)]($($repoInfo.parentUrl))**"
+    $repoLink = "**[$($repoInfo.repoName)]($($repoInfo.repoUrl))**"
+
     if ($repoInfo.parentArchived) {
         $issueTitle = "Parent repository for [$($repoInfo.repoName)] is archived"
-        $body = "The parent repository for **[$($repoInfo.repoName)]($($repoInfo.parentUrl))** is archived. `r`n### Important!`r`nConsider revisiting the usage and find alternatives.`r`nLeave this issue open or it will be recreated."
+        $body = "The upstream repository $upstreamLink of $repoLink has been archived. `r`n### Important!`r`nConsider revisiting the usage and find alternatives.`r`nLeave this issue open or it will be recreated."
         $labels = "parent-archived"
     } else {
-        $body = "The parent repository for **[$($repoInfo.repoName)]($($repoInfo.parentUrl))** has updates available. `r`n### Important!`r`nClick on this [compare link]($($repoInfo.compareUrl)) to check the incoming changes before updating the fork. `r`n `r`n### To update the fork`r`nAdd the label **update-fork** to this issue to update the fork automatically."
         $issueTitle = "Parent repository for [$($repoInfo.repoName)] has updates available"
+        $body = "The upstream repository $upstreamLink has changes that are not in $repoLink yet. `r`n### Important!`r`nClick on this [compare link]($($repoInfo.compareUrl)) to review the incoming changes before updating. `r`n `r`n### To apply the changes`r`nAdd the label **update-fork** to this issue to sync the versions listed below."
         $labels = "update-available"
     }
 

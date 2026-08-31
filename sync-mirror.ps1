@@ -13,27 +13,22 @@ function CollectApprovalSnapshot {
         [string] $headSha,
         [string] $baseSha,
         [string] $compareUrl,
-        [object] $syncSettings,
-        [bool] $isFork
+        [object] $syncSettings
     )
 
-    $tags = @()
+    # tags are pushed for forks and mirrors alike, so they are part of what gets approved in both cases
+    $tags = GetTags -gitHubHost $upstreamHost -repoFullName $upstream
     $releaseTags = @()
 
-    # a fork is merged on its default branch only, mirrors also carry tags and releases
-    if (-not $isFork) {
-        $tags = GetTags -gitHubHost $upstreamHost -repoFullName $upstream
-
-        if ($syncSettings.syncReleases -ne 'none') {
-            $releases = @(GetUpstreamReleases -gitHubHost $upstreamHost -repoFullName $upstream | Where-Object { -not $_.isDraft })
-            if ($syncSettings.syncReleases -eq 'immutable') {
-                $releases = @($releases | Where-Object { $_.immutable -eq $true })
-            }
-            $releaseTags = @($releases | ForEach-Object { $_.tagName })
+    if ($syncSettings.syncReleases -ne 'none') {
+        $releases = @(GetUpstreamReleases -gitHubHost $upstreamHost -repoFullName $upstream | Where-Object { -not $_.isDraft })
+        if ($syncSettings.syncReleases -eq 'immutable') {
+            $releases = @($releases | Where-Object { $_.immutable -eq $true })
         }
+        $releaseTags = @($releases | ForEach-Object { $_.tagName })
     }
 
-    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -tags $tags -releaseTags $releaseTags
+    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -tags $tags -releaseTags $releaseTags -releaseMode $syncSettings.syncReleases
 }
 
 function TestIsFloatingTag {

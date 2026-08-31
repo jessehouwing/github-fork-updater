@@ -107,6 +107,18 @@ Describe "Approval snapshots" {
         $body | Should -Not -Match '`8a4b3907a4717738c646d09c16c57617b5c9f48e`'
     }
 
+    It "says releases are not synced when the property is left at none" {
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releaseMode "none"
+
+        FormatApprovalSnapshot -snapshot $snapshot | Should -BeLike '*| Releases | not synced*'
+    }
+
+    It "distinguishes no matching releases from releases being switched off" {
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releaseMode "immutable"
+
+        FormatApprovalSnapshot -snapshot $snapshot | Should -BeLike '*none matched*immutable*'
+    }
+
     It "keeps the display fields out of the change comparison" {
         $approved = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -baseSha "old" -compareUrl "https://example.com/old"
         $current = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -baseSha "new" -compareUrl "https://example.com/new"
