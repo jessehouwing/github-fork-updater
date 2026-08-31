@@ -107,6 +107,40 @@ Describe "Approval snapshots" {
         $body | Should -Not -Match '`8a4b3907a4717738c646d09c16c57617b5c9f48e`'
     }
 
+    It "lists the tags by name with a link to the contents at that tag" {
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" `
+            -upstreamUrl "https://github.com" -tags $tags
+
+        $body = FormatApprovalSnapshot -snapshot $snapshot
+
+        # -Match with escaped input: [ and ] are character classes in wildcard patterns
+        $body | Should -Match ([regex]::Escape('[v1.0.0](https://github.com/actions/checkout/tree/v1.0.0)'))
+        $body | Should -Match ([regex]::Escape('[v1](https://github.com/actions/checkout/tree/v1)'))
+    }
+
+    It "caps the listed tags and links to the rest" {
+        $many = 1..40 | ForEach-Object { [PSCustomObject]@{ name = "v1.0.$_"; sha = "sha$_" } }
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" `
+            -upstreamUrl "https://github.com" -tags $many
+
+        $body = FormatApprovalSnapshot -snapshot $snapshot
+
+        $body | Should -Match ([regex]::Escape('and [15 more](https://github.com/actions/checkout/tags)'))
+        # the hidden marker must not carry every name either, the issue body is size limited
+        (ParseApprovalSnapshot -issueBody $body).tagNames.Count | Should -Be 25
+        (ParseApprovalSnapshot -issueBody $body).tagCount | Should -Be 40
+    }
+
+    It "still detects a moved tag that is not listed by name" {
+        $many = 1..40 | ForEach-Object { [PSCustomObject]@{ name = "v1.0.$_"; sha = "sha$_" } }
+        $moved = 1..40 | ForEach-Object { [PSCustomObject]@{ name = "v1.0.$_"; sha = if ($_ -eq 40) { "other" } else { "sha$_" } } }
+
+        $approved = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $many
+        $current = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $moved
+
+        (CompareApprovalSnapshots -approved $approved -current $current).changed | Should -BeTrue
+    }
+
     It "says releases are not synced when the property is left at none" {
         $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releaseMode "none"
 

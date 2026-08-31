@@ -3,6 +3,9 @@
 $script:ApprovalMarkerPattern = '(?s)<!--\s*fork-updater-approval:\s*(?<json>.*?)\s*-->'
 $script:ApprovalSectionHeading = "### Versions submitted for approval"
 
+# an issue body is capped at 65536 characters, so only this many refs are listed by name
+$script:MaxListedRefs = 25
+
 function GetContentDigest {
     param (
         [string[]] $values = @()
@@ -35,8 +38,9 @@ function NewApprovalSnapshot {
 
     $tagEntries = @(@($tags) | ForEach-Object { "$($_.name)@$($_.sha)" })
     $sortedReleaseTags = @(@($releaseTags) | Sort-Object)
+    $sortedTagNames = @(@($tags) | ForEach-Object { $_.name } | Sort-Object)
 
-    # baseSha, compareUrl, upstreamUrl and releaseMode are only used to render the issue, they are never compared
+    # baseSha, compareUrl, upstreamUrl, releaseMode and tagNames are only used to render the issue, they are never compared
     return [PSCustomObject]@{
         upstream       = $upstream
         defaultBranch  = $defaultBranch
@@ -46,10 +50,39 @@ function NewApprovalSnapshot {
         upstreamUrl    = $upstreamUrl
         releaseMode    = $releaseMode
         tagCount       = $tagEntries.Count
+        tagNames       = @($sortedTagNames | Select-Object -First $script:MaxListedRefs)
         tagsDigest     = GetContentDigest -values $tagEntries
         releaseTags    = $sortedReleaseTags
         releasesDigest = GetContentDigest -values $sortedReleaseTags
     }
+}
+
+function FormatRefLinks {
+    param (
+        [string[]] $names = @(),
+        [int] $total,
+        [string] $baseUrl,
+        [string] $path,
+        [string] $overflowUrl
+    )
+
+    $shown = @(@($names) | Select-Object -First $script:MaxListedRefs)
+    if ($shown.Count -eq 0) {
+        return ""
+    }
+
+    $links = @($shown | ForEach-Object {
+            if ($baseUrl) { "[$_]($baseUrl/$path/$([uri]::EscapeDataString($_)))" } else { "``$_``" }
+        })
+
+    $rendered = $links -join ', '
+
+    $remaining = $total - $shown.Count
+    if ($remaining -gt 0) {
+        $rendered += if ($overflowUrl) { " and [$remaining more]($overflowUrl)" } else { " and $remaining more" }
+    }
+
+    return $rendered
 }
 
 function GetShortSha {
@@ -94,18 +127,23 @@ function FormatApprovalSnapshot {
     }
     $lines += "| Branch | $branch |"
 
-    $tags = "$($snapshot.tagCount)"
-    if ($snapshot.tagCount -gt 0 -and $snapshot.upstreamUrl) {
-        $tags = "[$($snapshot.tagCount)]($($snapshot.upstreamUrl)/$($snapshot.upstream)/tags)"
+    $upstreamBase = if ($snapshot.upstreamUrl) { "$($snapshot.upstreamUrl)/$($snapshot.upstream)" } else { "" }
+
+    if ($snapshot.tagCount -gt 0) {
+        # tree/<tag> links to the repository contents at that tag
+        $tags = FormatRefLinks -names $snapshot.tagNames -total $snapshot.tagCount -baseUrl $upstreamBase -path "tree" -overflowUrl "$upstreamBase/tags"
+        if ([string]::IsNullOrWhiteSpace($tags)) {
+            $tags = "$($snapshot.tagCount)"
+        }
+        $lines += "| Tags | $tags |"
     }
-    $lines += "| Tags | $tags |"
+    else {
+        $lines += "| Tags | none |"
+    }
 
     if ($snapshot.releaseTags.Count -gt 0) {
-        $releases = @($snapshot.releaseTags)
-        if ($snapshot.upstreamUrl) {
-            $releases = @($releases | ForEach-Object { "[$_]($($snapshot.upstreamUrl)/$($snapshot.upstream)/releases/tag/$([uri]::EscapeDataString($_)))" })
-        }
-        $lines += "| Releases | $($releases -join ', ') |"
+        $releases = FormatRefLinks -names $snapshot.releaseTags -total $snapshot.releaseTags.Count -baseUrl $upstreamBase -path "releases/tag" -overflowUrl "$upstreamBase/releases"
+        $lines += "| Releases | $releases |"
     }
     elseif ($snapshot.releaseMode -eq 'none') {
         $lines += "| Releases | not synced, set the ``sync-releases`` custom property to change that |"
