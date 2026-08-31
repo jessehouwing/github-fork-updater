@@ -129,12 +129,13 @@ function GetTagActions {
         [object[]] $targetTags = @()
     )
 
+    # an empty array returned from a function arrives here as $null, and @($null) is a single null element
     $existing = @{}
-    foreach ($tag in @($targetTags)) {
+    foreach ($tag in @($targetTags | Where-Object { $null -ne $_.name })) {
         $existing[$tag.name] = $tag.sha
     }
 
-    return @(@($upstreamTags) | ForEach-Object {
+    return @(@($upstreamTags | Where-Object { $null -ne $_.name }) | ForEach-Object {
             $action = if (-not $existing.ContainsKey($_.name)) { 'new' }
             elseif ($existing[$_.name] -ne $_.sha) { 'force push required' }
             else { 'unchanged' }

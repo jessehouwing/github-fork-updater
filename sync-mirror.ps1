@@ -26,11 +26,11 @@ function CollectApprovalSnapshot {
 
     $releases = @()
     if ($syncSettings.syncReleases -ne 'none') {
-        $upstreamReleases = @(GetUpstreamReleases -gitHubHost $upstreamHost -repoFullName $upstream | Where-Object { -not $_.isDraft })
+        $upstreamReleases = @(GetUpstreamReleases -gitHubHost $upstreamHost -repoFullName $upstream | Where-Object { $null -ne $_ -and -not $_.isDraft })
         if ($syncSettings.syncReleases -eq 'immutable') {
             $upstreamReleases = @($upstreamReleases | Where-Object { $_.immutable -eq $true })
         }
-        $releases = @($upstreamReleases | ForEach-Object { [PSCustomObject]@{ name = $_.tagName; immutable = [bool]$_.immutable } })
+        $releases = @($upstreamReleases | Where-Object { $null -ne $_.tagName } | ForEach-Object { [PSCustomObject]@{ name = $_.tagName; immutable = [bool]$_.immutable } })
     }
 
     return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -branchAction $branchAction -tags $tags -releases $releases -releaseMode $syncSettings.syncReleases
@@ -352,9 +352,9 @@ function SyncReleases {
         return [PSCustomObject]@{ success = $true; created = 0; skipped = 0 }
     }
 
-    $upstreamReleases = GetUpstreamReleases -gitHubHost $sourceHost -repoFullName $upstream
+    $upstreamReleases = @(GetUpstreamReleases -gitHubHost $sourceHost -repoFullName $upstream | Where-Object { $null -ne $_ })
     $existingReleases = CallWebRequest -url "repos/$mirror/releases?per_page=100" -gitHubHost $targetHost
-    $existingTags = @($existingReleases | ForEach-Object { $_.tag_name })
+    $existingTags = @($existingReleases | Where-Object { $null -ne $_.tag_name } | ForEach-Object { $_.tag_name })
 
     $created = 0
     $skipped = 0

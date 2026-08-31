@@ -41,15 +41,17 @@ function NewApprovalSnapshot {
         [object[]] $releases = @()
     )
 
-    $tagEntries = @(@($tags) | ForEach-Object { "$($_.name)@$($_.sha)" })
+    # an empty array returned from a function arrives here as $null, and @($null) is a single null element
+    $tagItems = @($tags | Where-Object { $null -ne $_ })
+    $tagEntries = @($tagItems | ForEach-Object { "$($_.name)@$($_.sha)" })
 
     # a release may be passed as a plain tag name or as an object carrying its immutability
-    $releaseItems = @(@($releases) | ForEach-Object {
+    $releaseItems = @($releases | Where-Object { $null -ne $_ } | ForEach-Object {
             if ($_ -is [string]) { [PSCustomObject]@{ name = $_; immutable = $null } }
             else { [PSCustomObject]@{ name = $_.name; immutable = $_.immutable } }
         } | Sort-Object -Property name)
 
-    $changedTags = @(@($tags) | Where-Object { $_.action -and $_.action -ne 'unchanged' } | Sort-Object -Property name)
+    $changedTags = @($tagItems | Where-Object { $_.action -and $_.action -ne 'unchanged' } | Sort-Object -Property name)
 
     # everything except the digests, counts and shas is only used to render the issue, it is never compared
     return [PSCustomObject]@{

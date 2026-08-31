@@ -109,15 +109,15 @@ function TestReleasesOutOfSync {
         return $false
     }
 
-    $upstreamReleases = GetUpstreamReleases -gitHubHost $sourceHost -repoFullName $upstream | Where-Object { -not $_.isDraft }
+    $upstreamReleases = @(GetUpstreamReleases -gitHubHost $sourceHost -repoFullName $upstream | Where-Object { $null -ne $_ -and -not $_.isDraft })
     if ($syncSettings.syncReleases -eq 'immutable') {
-        $upstreamReleases = $upstreamReleases | Where-Object { $_.immutable -eq $true }
+        $upstreamReleases = @($upstreamReleases | Where-Object { $_.immutable -eq $true })
     }
 
     $existingReleases = CallWebRequest -url "repos/$mirror/releases?per_page=100" -gitHubHost $targetHost
-    $existingTags = @($existingReleases | ForEach-Object { $_.tag_name })
+    $existingTags = @($existingReleases | Where-Object { $null -ne $_.tag_name } | ForEach-Object { $_.tag_name })
 
-    $missing = @($upstreamReleases | Where-Object { $existingTags -notcontains $_.tagName })
+    $missing = @($upstreamReleases | Where-Object { $null -ne $_.tagName -and $existingTags -notcontains $_.tagName })
     if ($missing.Count -gt 0) {
         Write-Host "Found [$($missing.Count)] releases on [$upstream] that are missing on [$mirror]"
         return $true
@@ -270,7 +270,7 @@ function CreateIssuesForReposWithUpdates {
 
     Write-Host "Found $($existingIssues.Count) existing issues in issues repository [$issuesRepository]"
 
-    foreach ($repo in $reposWithUpdates) {        
+    foreach ($repo in @($reposWithUpdates | Where-Object { $null -ne $_ })) {        
         CreateIssueFor -repoInfo $repo -issuesRepositoryName $issuesRepository -existingIssues $existingIssues -gitHubHost $gitHubHost
     }
 }
@@ -284,8 +284,8 @@ function ProcessReposWithUpdates {
     )
 
     # repos configured with sync-mode: auto are synced straight away, the rest go through an issue
-    $autoSync = @($reposWithUpdates | Where-Object { $_.syncSettings.syncMode -eq 'auto' -and -not $_.isFork })
-    $needsApproval = @($reposWithUpdates | Where-Object { $_.syncSettings.syncMode -ne 'auto' -or $_.isFork })
+    $autoSync = @($reposWithUpdates | Where-Object { $null -ne $_ -and $_.syncSettings.syncMode -eq 'auto' -and -not $_.isFork })
+    $needsApproval = @($reposWithUpdates | Where-Object { $null -ne $_ -and ($_.syncSettings.syncMode -ne 'auto' -or $_.isFork) })
 
     foreach ($repo in $autoSync) {
         $null = SyncRepo -repoInfo $repo -sourceHost $sourceHost -targetHost $targetHost

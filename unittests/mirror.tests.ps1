@@ -49,6 +49,17 @@ Describe "GetTagActions" {
         $result = GetTagActions -upstreamTags @([PSCustomObject]@{ name = "v1"; sha = "aaa" }) -targetTags @([PSCustomObject]@{ name = "v1"; sha = "aaa" })
         $result[0].action | Should -Be "unchanged"
     }
+
+    It "treats a target without any tags as new tags" {
+        # GetTags returns @() for a repo without tags, which unrolls to $null on the way in
+        $result = GetTagActions -upstreamTags @([PSCustomObject]@{ name = "v1"; sha = "aaa" }) -targetTags $null
+        $result.Count | Should -Be 1
+        $result[0].action | Should -Be "new"
+    }
+
+    It "returns nothing when the upstream has no tags" {
+        GetTagActions -upstreamTags $null -targetTags $null | Should -BeNullOrEmpty
+    }
 }
 
 Describe "BuildCompareUrl" {
@@ -200,6 +211,12 @@ Describe "Approval snapshots" {
 
         $body | Should -Match "$([char]::ConvertFromUtf32(0x1F512)) \[v1\.0\.0\]"
         $body | Should -Match "$([char]::ConvertFromUtf32(0x1F513)) \[v1\.1\.0\]"
+    }
+
+    It "does not count a phantom tag when there are no tags at all" {
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $null -releases $null
+        $snapshot.tagCount | Should -Be 0
+        $snapshot.releaseTags.Count | Should -Be 0
     }
 
     It "says releases are not synced when the property is left at none" {
