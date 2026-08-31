@@ -33,6 +33,9 @@ jobs:
         app-id: ${{ secrets.GH_AUTOMATION_ID }}
         private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
         target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
+        target-contents-permission: write
+        target-issues-permission: write
+        target-actions-permission: write
         pat: ${{ secrets.PAT_GITHUB }}
         use-public-github-app: ${{ vars.USE_PUBLIC_GITHUB_APP }}
         public-app-id: ${{ secrets.GH_PUBLIC_APP_ID }}

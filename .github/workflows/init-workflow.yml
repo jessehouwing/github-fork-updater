@@ -1,3 +1,5 @@
+# This workflow is managed by gh actions-lock.
+
 name: Initialize the labels
 
 on:
@@ -32,6 +34,7 @@ jobs:
         app-id: ${{ secrets.GH_AUTOMATION_ID }}
         private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
         target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
+        target-issues-permission: write
         pat: ${{ secrets.PAT_GITHUB }}
 
     - name: Create the labels

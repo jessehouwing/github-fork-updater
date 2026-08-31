@@ -17,6 +17,10 @@ workflows:
         - 'actions/checkout@v7.0.1'
         - 'actions/dependency-review-action@v5.0.0'
         - 'step-security/harden-runner@v2.20.0'
+    '.github/workflows/init-workflow.yml':
+        - 'actions/checkout@v7.0.1'
+        - 'actions/create-github-app-token@v3.2.0'
+        - 'step-security/harden-runner@v2.20.0'
     '.github/workflows/new-issue-notification.yml':
         - 'actions/checkout@v7.0.1'
         - 'actions/create-github-app-token@v3.2.0'

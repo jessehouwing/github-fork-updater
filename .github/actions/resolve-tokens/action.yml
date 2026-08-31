@@ -27,6 +27,18 @@ inputs:
     description: The organization the target GitHub App is installed on
     required: false
     default: ''
+  target-contents-permission:
+    description: Contents permission requested for the target GitHub App token
+    required: false
+    default: 'read'
+  target-issues-permission:
+    description: Issues permission requested for the target GitHub App token
+    required: false
+    default: 'none'
+  target-actions-permission:
+    description: Actions permission requested for the target GitHub App token
+    required: false
+    default: 'none'
   pat:
     description: Fallback token for the target host
     required: false
@@ -107,6 +119,9 @@ runs:
       # without an owner the token is scoped to this repository only, but the updater works on other repositories
       owner: ${{ inputs.target-org }}
       github-api-url: ${{ steps.urls.outputs.target-api-url }}
+      permission-contents: ${{ inputs.target-contents-permission }}
+      permission-issues: ${{ inputs.target-issues-permission }}
+      permission-actions: ${{ inputs.target-actions-permission }}
 
   - uses: actions/create-github-app-token@v3.2.0
     name: Get token from the GitHub App on public GitHub
@@ -117,6 +132,7 @@ runs:
       private-key: ${{ inputs.public-private-key }}
       owner: ${{ inputs.public-org }}
       github-api-url: https://api.github.com
+      permission-contents: read
 
   - id: tokens
     name: Determine tokens to use
