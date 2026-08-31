@@ -22,6 +22,35 @@ Describe "GetRequiredLabels" {
     }
 }
 
+Describe "MapCompareStatus" {
+    It "maps <status> to <expected>" -ForEach @(
+        @{ status = "identical"; expected = "up to date" }
+        @{ status = "ahead"; expected = "fast-forward" }
+        @{ status = "behind"; expected = "force push required" }
+        @{ status = "diverged"; expected = "force push required" }
+        @{ status = $null; expected = "unknown" }
+    ) {
+        MapCompareStatus -status $status | Should -Be $expected
+    }
+}
+
+Describe "GetTagActions" {
+    It "marks a tag the target does not have as new" {
+        $result = GetTagActions -upstreamTags @([PSCustomObject]@{ name = "v2"; sha = "aaa" }) -targetTags @()
+        $result[0].action | Should -Be "new"
+    }
+
+    It "marks a tag that points elsewhere on the target as needing a force push" {
+        $result = GetTagActions -upstreamTags @([PSCustomObject]@{ name = "v1"; sha = "bbb" }) -targetTags @([PSCustomObject]@{ name = "v1"; sha = "aaa" })
+        $result[0].action | Should -Be "force push required"
+    }
+
+    It "marks an identical tag as unchanged" {
+        $result = GetTagActions -upstreamTags @([PSCustomObject]@{ name = "v1"; sha = "aaa" }) -targetTags @([PSCustomObject]@{ name = "v1"; sha = "aaa" })
+        $result[0].action | Should -Be "unchanged"
+    }
+}
+
 Describe "BuildCompareUrl" {
     It "pins a fork comparison to both commits inside the fork network" {
         $url = BuildCompareUrl -targetServerUrl "https://github.com" -upstreamServerUrl "https://github.com" `
@@ -63,7 +92,7 @@ Describe "Approval snapshots" {
     }
 
     It "round trips through the issue body" {
-        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $tags -releaseTags @("v1.0.0")
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $tags -releases @("v1.0.0")
         $body = UpdateApprovalSnapshotInBody -issueBody "Some description" -snapshot $snapshot
 
         $parsed = ParseApprovalSnapshot -issueBody $body
@@ -96,7 +125,7 @@ Describe "Approval snapshots" {
         $snapshot = NewApprovalSnapshot -upstream "microsoft/azure-pipelines-tasks" -defaultBranch "master" `
             -headSha "8a4b3907a4717738c646d09c16c57617b5c9f48e" -baseSha "aaa111" `
             -compareUrl "https://github.com/jessehouwing/azure-pipelines-tasks/compare/aaa111...microsoft:8a4b390" `
-            -upstreamUrl "https://github.com" -releaseTags @("v1.0.0")
+            -upstreamUrl "https://github.com" -releases @("v1.0.0")
 
         $body = FormatApprovalSnapshot -snapshot $snapshot
 
@@ -107,19 +136,30 @@ Describe "Approval snapshots" {
         $body | Should -Not -Match '`8a4b3907a4717738c646d09c16c57617b5c9f48e`'
     }
 
-    It "lists the tags by name with a link to the contents at that tag" {
+    It "lists the changed tags with their action and a link to the contents at that tag" {
+        $changed = @(
+            [PSCustomObject]@{ name = "v1.0.0"; sha = "aaa"; action = "new" }
+            [PSCustomObject]@{ name = "v1"; sha = "bbb"; action = "force push required" }
+        )
         $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" `
-            -upstreamUrl "https://github.com" -tags $tags
+            -upstreamUrl "https://github.com" -tags $changed
 
         $body = FormatApprovalSnapshot -snapshot $snapshot
 
         # -Match with escaped input: [ and ] are character classes in wildcard patterns
-        $body | Should -Match ([regex]::Escape('[v1.0.0](https://github.com/actions/checkout/tree/v1.0.0)'))
-        $body | Should -Match ([regex]::Escape('[v1](https://github.com/actions/checkout/tree/v1)'))
+        $body | Should -Match ([regex]::Escape('[v1.0.0](https://github.com/actions/checkout/tree/v1.0.0) (new)'))
+        $body | Should -Match ([regex]::Escape('[v1](https://github.com/actions/checkout/tree/v1) (force push required)'))
+    }
+
+    It "only reports a count when no tag changes" {
+        $unchanged = @([PSCustomObject]@{ name = "v1"; sha = "aaa"; action = "unchanged" })
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $unchanged
+
+        FormatApprovalSnapshot -snapshot $snapshot | Should -BeLike '*| Tags | 1 unchanged |*'
     }
 
     It "caps the listed tags and links to the rest" {
-        $many = 1..40 | ForEach-Object { [PSCustomObject]@{ name = "v1.0.$_"; sha = "sha$_" } }
+        $many = 1..40 | ForEach-Object { [PSCustomObject]@{ name = "v1.0.$_"; sha = "sha$_"; action = "new" } }
         $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" `
             -upstreamUrl "https://github.com" -tags $many
 
@@ -127,7 +167,7 @@ Describe "Approval snapshots" {
 
         $body | Should -Match ([regex]::Escape('and [15 more](https://github.com/actions/checkout/tags)'))
         # the hidden marker must not carry every name either, the issue body is size limited
-        (ParseApprovalSnapshot -issueBody $body).tagNames.Count | Should -Be 25
+        (ParseApprovalSnapshot -issueBody $body).tagList.Count | Should -Be 25
         (ParseApprovalSnapshot -issueBody $body).tagCount | Should -Be 40
     }
 
@@ -139,6 +179,27 @@ Describe "Approval snapshots" {
         $current = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $moved
 
         (CompareApprovalSnapshots -approved $approved -current $current).changed | Should -BeTrue
+    }
+
+    It "shows whether the branch fast-forwards or needs a force push" {
+        $fastForward = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -branchAction "fast-forward"
+        $forced = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -branchAction "force push required"
+
+        FormatApprovalSnapshot -snapshot $fastForward | Should -BeLike '*fast-forward*'
+        FormatApprovalSnapshot -snapshot $forced | Should -BeLike '*force push required*'
+    }
+
+    It "marks immutable releases with a closed lock and mutable ones with an open lock" {
+        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" `
+            -upstreamUrl "https://github.com" -releaseMode "all" -releases @(
+            [PSCustomObject]@{ name = "v1.0.0"; immutable = $true }
+            [PSCustomObject]@{ name = "v1.1.0"; immutable = $false }
+        )
+
+        $body = FormatApprovalSnapshot -snapshot $snapshot
+
+        $body | Should -Match "$([char]::ConvertFromUtf32(0x1F512)) \[v1\.0\.0\]"
+        $body | Should -Match "$([char]::ConvertFromUtf32(0x1F513)) \[v1\.1\.0\]"
     }
 
     It "says releases are not synced when the property is left at none" {
@@ -188,8 +249,8 @@ Describe "Approval snapshots" {
     }
 
     It "reports which releases are new" {
-        $approved = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releaseTags @("v1.0.0")
-        $current = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releaseTags @("v1.0.0", "v1.0.1")
+        $approved = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releases @("v1.0.0")
+        $current = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -releases @("v1.0.0", "v1.0.1")
 
         $result = CompareApprovalSnapshots -approved $approved -current $current
         $result.changed | Should -BeTrue

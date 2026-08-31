@@ -6,6 +6,10 @@ $script:ApprovalSectionHeading = "### Versions submitted for approval"
 # an issue body is capped at 65536 characters, so only this many refs are listed by name
 $script:MaxListedRefs = 25
 
+# padlocks live outside the BMP, so [char] cannot hold them
+$script:LockedIcon = [char]::ConvertFromUtf32(0x1F512)
+$script:UnlockedIcon = [char]::ConvertFromUtf32(0x1F513)
+
 function GetContentDigest {
     param (
         [string[]] $values = @()
@@ -31,29 +35,39 @@ function NewApprovalSnapshot {
         [string] $baseSha,
         [string] $compareUrl,
         [string] $upstreamUrl,
+        [string] $branchAction = "unknown",
         [string] $releaseMode = "none",
         [object[]] $tags = @(),
-        [string[]] $releaseTags = @()
+        [object[]] $releases = @()
     )
 
     $tagEntries = @(@($tags) | ForEach-Object { "$($_.name)@$($_.sha)" })
-    $sortedReleaseTags = @(@($releaseTags) | Sort-Object)
-    $sortedTagNames = @(@($tags) | ForEach-Object { $_.name } | Sort-Object)
 
-    # baseSha, compareUrl, upstreamUrl, releaseMode and tagNames are only used to render the issue, they are never compared
+    # a release may be passed as a plain tag name or as an object carrying its immutability
+    $releaseItems = @(@($releases) | ForEach-Object {
+            if ($_ -is [string]) { [PSCustomObject]@{ name = $_; immutable = $null } }
+            else { [PSCustomObject]@{ name = $_.name; immutable = $_.immutable } }
+        } | Sort-Object -Property name)
+
+    $changedTags = @(@($tags) | Where-Object { $_.action -and $_.action -ne 'unchanged' } | Sort-Object -Property name)
+
+    # everything except the digests, counts and shas is only used to render the issue, it is never compared
     return [PSCustomObject]@{
-        upstream       = $upstream
-        defaultBranch  = $defaultBranch
-        headSha        = $headSha
-        baseSha        = $baseSha
-        compareUrl     = $compareUrl
-        upstreamUrl    = $upstreamUrl
-        releaseMode    = $releaseMode
-        tagCount       = $tagEntries.Count
-        tagNames       = @($sortedTagNames | Select-Object -First $script:MaxListedRefs)
-        tagsDigest     = GetContentDigest -values $tagEntries
-        releaseTags    = $sortedReleaseTags
-        releasesDigest = GetContentDigest -values $sortedReleaseTags
+        upstream           = $upstream
+        defaultBranch      = $defaultBranch
+        headSha            = $headSha
+        baseSha            = $baseSha
+        compareUrl         = $compareUrl
+        upstreamUrl        = $upstreamUrl
+        branchAction       = $branchAction
+        releaseMode        = $releaseMode
+        tagCount           = $tagEntries.Count
+        tagChangedCount    = $changedTags.Count
+        tagList            = @($changedTags | Select-Object -First $script:MaxListedRefs | ForEach-Object { [PSCustomObject]@{ name = $_.name; action = $_.action } })
+        tagsDigest         = GetContentDigest -values $tagEntries
+        releaseTags        = @($releaseItems | ForEach-Object { $_.name })
+        releaseList        = @($releaseItems | Select-Object -First $script:MaxListedRefs)
+        releasesDigest     = GetContentDigest -values @($releaseItems | ForEach-Object { $_.name })
     }
 }
 
@@ -80,6 +94,42 @@ function FormatRefLinks {
     $remaining = $total - $shown.Count
     if ($remaining -gt 0) {
         $rendered += if ($overflowUrl) { " and [$remaining more]($overflowUrl)" } else { " and $remaining more" }
+    }
+
+    return $rendered
+}
+
+function FormatTagCell {
+    param (
+        [object] $snapshot,
+        [string] $upstreamBase
+    )
+
+    if ($snapshot.tagCount -eq 0) {
+        return "none"
+    }
+
+    $unchanged = $snapshot.tagCount - $snapshot.tagChangedCount
+
+    if ($snapshot.tagChangedCount -eq 0) {
+        return "$($snapshot.tagCount) unchanged"
+    }
+
+    # tree/<tag> links to the repository contents at that tag
+    $links = @(@($snapshot.tagList) | ForEach-Object {
+            $name = if ($upstreamBase) { "[$($_.name)]($upstreamBase/tree/$([uri]::EscapeDataString($_.name)))" } else { "``$($_.name)``" }
+            "$name ($($_.action))"
+        })
+
+    $rendered = $links -join ', '
+
+    $notListed = $snapshot.tagChangedCount - @($snapshot.tagList).Count
+    if ($notListed -gt 0) {
+        $rendered += if ($upstreamBase) { " and [$notListed more]($upstreamBase/tags)" } else { " and $notListed more" }
+    }
+
+    if ($unchanged -gt 0) {
+        $rendered += ", $unchanged unchanged"
     }
 
     return $rendered
@@ -122,6 +172,9 @@ function FormatApprovalSnapshot {
     }
 
     $branch = "``$($snapshot.defaultBranch)`` at ``$(GetShortSha -sha $snapshot.headSha)``"
+    if ($snapshot.branchAction -and $snapshot.branchAction -ne 'unknown') {
+        $branch += ", $($snapshot.branchAction)"
+    }
     if ($snapshot.compareUrl) {
         $branch += " ([review the incoming commits]($($snapshot.compareUrl)))"
     }
@@ -129,21 +182,21 @@ function FormatApprovalSnapshot {
 
     $upstreamBase = if ($snapshot.upstreamUrl) { "$($snapshot.upstreamUrl)/$($snapshot.upstream)" } else { "" }
 
-    if ($snapshot.tagCount -gt 0) {
-        # tree/<tag> links to the repository contents at that tag
-        $tags = FormatRefLinks -names $snapshot.tagNames -total $snapshot.tagCount -baseUrl $upstreamBase -path "tree" -overflowUrl "$upstreamBase/tags"
-        if ([string]::IsNullOrWhiteSpace($tags)) {
-            $tags = "$($snapshot.tagCount)"
-        }
-        $lines += "| Tags | $tags |"
-    }
-    else {
-        $lines += "| Tags | none |"
-    }
+    $lines += "| Tags | $(FormatTagCell -snapshot $snapshot -upstreamBase $upstreamBase) |"
 
-    if ($snapshot.releaseTags.Count -gt 0) {
-        $releases = FormatRefLinks -names $snapshot.releaseTags -total $snapshot.releaseTags.Count -baseUrl $upstreamBase -path "releases/tag" -overflowUrl "$upstreamBase/releases"
-        $lines += "| Releases | $releases |"
+    if ($snapshot.releaseList.Count -gt 0) {
+        $releases = @($snapshot.releaseList | ForEach-Object {
+                $lock = if ($null -eq $_.immutable) { "" } elseif ($_.immutable) { "$script:LockedIcon " } else { "$script:UnlockedIcon " }
+                if ($upstreamBase) { "$lock[$($_.name)]($upstreamBase/releases/tag/$([uri]::EscapeDataString($_.name)))" } else { "$lock``$($_.name)``" }
+            })
+
+        $remaining = $snapshot.releaseTags.Count - $snapshot.releaseList.Count
+        $rendered = $releases -join ', '
+        if ($remaining -gt 0) {
+            $rendered += if ($upstreamBase) { " and [$remaining more]($upstreamBase/releases)" } else { " and $remaining more" }
+        }
+
+        $lines += "| Releases | $rendered |"
     }
     elseif ($snapshot.releaseMode -eq 'none') {
         $lines += "| Releases | not synced, set the ``sync-releases`` custom property to change that |"
@@ -151,6 +204,9 @@ function FormatApprovalSnapshot {
     else {
         $lines += "| Releases | none matched ``sync-releases: $($snapshot.releaseMode)`` |"
     }
+
+    $lines += ""
+    $lines += "$script:LockedIcon immutable release, $script:UnlockedIcon mutable release."
 
     $lines += ""
     $lines += "Approving this issue applies exactly these versions. If the upstream changes before the **update-fork** label is applied, the label is removed and the changes have to be reviewed again."

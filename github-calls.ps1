@@ -249,6 +249,23 @@ function SetLabel {
     return $true
 }
 
+function GetCompareStatus {
+    param (
+        [object] $gitHubHost,
+        [string] $repoFullName,
+        [string] $baseRef,
+        [string] $headRef
+    )
+
+    # refs may be owner:sha for a cross fork comparison, so they are not url encoded
+    $info = CallWebRequest -url "repos/$repoFullName/compare/$baseRef...$headRef" -gitHubHost $gitHubHost
+    if ($null -eq $info) {
+        return $null
+    }
+
+    return $info.status
+}
+
 function GetIssue {
     param (
         [object] $gitHubHost,

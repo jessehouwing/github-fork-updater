@@ -139,7 +139,7 @@ function Main {
     $compareUrl = BuildCompareUrl -targetServerUrl $targetHost.ServerUrl -upstreamServerUrl $upstreamHost.ServerUrl -repoFullName $repo.full_name -upstreamFullName $upstream -baseSha $baseCommit.sha -headSha $branchCommit.sha -defaultBranch $defaultBranch -isFork ([bool]$repo.fork)
 
     # only apply what was actually reviewed: re-check the upstream against the versions recorded on the issue
-    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -syncSettings $syncSettings
+    $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -targetHost $targetHost -repoFullName $repo.full_name -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -syncSettings $syncSettings
 
     $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
     $approved = ParseApprovalSnapshot -issueBody $issue.body

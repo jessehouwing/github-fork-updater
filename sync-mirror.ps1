@@ -8,27 +8,32 @@ $script:FloatingTagPattern = '^(v?\d+(\.\d+)?|latest)$'
 function CollectApprovalSnapshot {
     param (
         [object] $upstreamHost,
+        [object] $targetHost,
+        [string] $repoFullName,
         [string] $upstream,
         [string] $defaultBranch,
         [string] $headSha,
         [string] $baseSha,
         [string] $compareUrl,
+        [string] $branchAction = "unknown",
         [object] $syncSettings
     )
 
     # tags are pushed for forks and mirrors alike, so they are part of what gets approved in both cases
-    $tags = GetTags -gitHubHost $upstreamHost -repoFullName $upstream
-    $releaseTags = @()
+    $upstreamTags = GetTags -gitHubHost $upstreamHost -repoFullName $upstream
+    $targetTags = GetTags -gitHubHost $targetHost -repoFullName $repoFullName
+    $tags = GetTagActions -upstreamTags $upstreamTags -targetTags $targetTags
 
+    $releases = @()
     if ($syncSettings.syncReleases -ne 'none') {
-        $releases = @(GetUpstreamReleases -gitHubHost $upstreamHost -repoFullName $upstream | Where-Object { -not $_.isDraft })
+        $upstreamReleases = @(GetUpstreamReleases -gitHubHost $upstreamHost -repoFullName $upstream | Where-Object { -not $_.isDraft })
         if ($syncSettings.syncReleases -eq 'immutable') {
-            $releases = @($releases | Where-Object { $_.immutable -eq $true })
+            $upstreamReleases = @($upstreamReleases | Where-Object { $_.immutable -eq $true })
         }
-        $releaseTags = @($releases | ForEach-Object { $_.tagName })
+        $releases = @($upstreamReleases | ForEach-Object { [PSCustomObject]@{ name = $_.tagName; immutable = [bool]$_.immutable } })
     }
 
-    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -tags $tags -releaseTags $releaseTags -releaseMode $syncSettings.syncReleases
+    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -branchAction $branchAction -tags $tags -releases $releases -releaseMode $syncSettings.syncReleases
 }
 
 function TestIsFloatingTag {

@@ -108,6 +108,45 @@ function BuildCompareUrl {
     return "$upstreamServerUrl/$upstreamFullName/compare/$baseSha...$headSha"
 }
 
+function MapCompareStatus {
+    param (
+        [string] $status
+    )
+
+    switch ($status) {
+        'identical' { return 'up to date' }
+        'ahead' { return 'fast-forward' }
+        # the target carries commits the upstream does not have, so the branch cannot be fast-forwarded
+        'behind' { return 'force push required' }
+        'diverged' { return 'force push required' }
+        default { return 'unknown' }
+    }
+}
+
+function GetTagActions {
+    param (
+        [object[]] $upstreamTags = @(),
+        [object[]] $targetTags = @()
+    )
+
+    $existing = @{}
+    foreach ($tag in @($targetTags)) {
+        $existing[$tag.name] = $tag.sha
+    }
+
+    return @(@($upstreamTags) | ForEach-Object {
+            $action = if (-not $existing.ContainsKey($_.name)) { 'new' }
+            elseif ($existing[$_.name] -ne $_.sha) { 'force push required' }
+            else { 'unchanged' }
+
+            [PSCustomObject]@{
+                name   = $_.name
+                sha    = $_.sha
+                action = $action
+            }
+        })
+}
+
 function ResolveRepoAcrossHosts {
     param (
         [string] $repoFullName,

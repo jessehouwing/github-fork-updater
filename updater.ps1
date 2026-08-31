@@ -66,6 +66,18 @@ function GetUpstreamState {
 
     $compareUrl = BuildCompareUrl -targetServerUrl $targetHost.ServerUrl -upstreamServerUrl $upstreamHost.ServerUrl -repoFullName $repo.full_name -upstreamFullName $upstreamInfo.full_name -baseSha $baseCommit.sha -headSha $branchCommit.sha -defaultBranch $defaultBranch -isFork ([bool]$repo.fork)
 
+    # whether the branch can be fast-forwarded or needs a force push
+    $branchAction = "unknown"
+    if ($baseCommit.sha -and $branchCommit.sha) {
+        if ($repo.fork) {
+            $status = GetCompareStatus -gitHubHost $targetHost -repoFullName $repo.full_name -baseRef $baseCommit.sha -headRef "$($upstreamInfo.owner.login):$($branchCommit.sha)"
+        }
+        else {
+            $status = GetCompareStatus -gitHubHost $upstreamHost -repoFullName $upstreamInfo.full_name -baseRef $baseCommit.sha -headRef $branchCommit.sha
+        }
+        $branchAction = MapCompareStatus -status $status
+    }
+
     return [PSCustomObject]@{
         parentUrl       = $upstreamInfo.html_url
         parentArchived  = $upstreamInfo.archived
@@ -76,6 +88,7 @@ function GetUpstreamState {
         defaultBranch   = $defaultBranch
         headSha         = $branchCommit.sha
         baseSha         = $baseCommit.sha
+        branchAction    = $branchAction
         lastPushRepo    = $repo.pushed_at
         lastPushParent  = $branchCommit.date
         updateAvailable = ($repo.pushed_at -lt $branchCommit.date)
@@ -167,7 +180,7 @@ function CheckAllReposInOrg {
         if ($repoInfo.updateAvailable -or $repoInfo.parentArchived -or $releasesOutOfSync) {
             Write-Host "Found new updates in the upstream repository [$($repoInfo.parentUrl)], compare the changes with [$($repoInfo.compareUrl)]"
 
-            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -baseSha $repoInfo.baseSha -compareUrl $repoInfo.compareUrl -syncSettings $syncSettings
+            $snapshot = CollectApprovalSnapshot -upstreamHost $repoInfo.upstreamHost -targetHost $targetHost -repoFullName $repo.full_name -upstream $repoInfo.upstreamName -defaultBranch $repoInfo.defaultBranch -headSha $repoInfo.headSha -baseSha $repoInfo.baseSha -compareUrl $repoInfo.compareUrl -branchAction $repoInfo.branchAction -syncSettings $syncSettings
 
             $repoData = [PSCustomObject]@{
                 repoName       = $repo.full_name
