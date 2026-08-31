@@ -33,7 +33,7 @@ function CollectApprovalSnapshot {
         $releases = @($upstreamReleases | Where-Object { $null -ne $_.tagName } | ForEach-Object { [PSCustomObject]@{ name = $_.tagName; immutable = [bool]$_.immutable } })
     }
 
-    return NewApprovalSnapshot -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -branchAction $branchAction -tags $tags -releases $releases -releaseMode $syncSettings.syncReleases
+    return NewApprovalSnapshot -target $repoFullName -upstream $upstream -defaultBranch $defaultBranch -headSha $headSha -baseSha $baseSha -compareUrl $compareUrl -upstreamUrl $upstreamHost.ServerUrl -branchAction $branchAction -tags $tags -releases $releases -releaseMode $syncSettings.syncReleases
 }
 
 function TestIsFloatingTag {
@@ -61,6 +61,9 @@ function TestCanApplyUpdate {
     }
 
     $allForcedTags = @($snapshot.tagList | Where-Object { $_.action -eq 'force push required' })
+    if ($null -ne $snapshot.forceUpdateTags) {
+        $allForcedTags = @($snapshot.forceUpdateTags | ForEach-Object { [PSCustomObject]@{ name = $_; action = 'force push required' } })
+    }
 
     if ($allForcedTags.Count -gt 0) {
         $blockedBySetting = @($allForcedTags | Where-Object {
@@ -81,14 +84,30 @@ function TestCanApplyUpdate {
                 }
             }
 
-            $tagProtections = CallWebRequest -url "repos/$repoFullName/tags/protection" -gitHubHost $targetHost
+            try {
+                $tagProtections = CallWebRequest -url "repos/$repoFullName/rulesets?includes_parents=true" -gitHubHost $targetHost -throwOnFailure
+            }
+            catch {
+                $blockers += "Could not verify repository rulesets on [$repoFullName]; refusing to update existing tags."
+                $tagProtections = @()
+            }
             if ($tagProtections -and $tagProtections.Count -gt 0) {
                 foreach ($tag in $allForcedTags) {
-                    foreach ($rule in $tagProtections) {
-                        if ($rule.pattern) {
-                            $pattern = '^' + [regex]::Escape($rule.pattern).Replace('\*', '.*') + '$'
+                    foreach ($ruleSet in $tagProtections) {
+                        if ($ruleSet.enforcement -eq 'disabled') {
+                            continue
+                        }
+
+                        $patterns = @($ruleSet.conditions.ref_name.include | Where-Object { $_ })
+                        if ($patterns.Count -eq 0) {
+                            continue
+                        }
+
+                        foreach ($rulePattern in $patterns) {
+                            $pattern = $rulePattern -replace '^refs/tags/', ''
+                            $pattern = '^' + [regex]::Escape($pattern).Replace('\*', '.*').Replace('~ALL', '.*') + '$'
                             if ($tag.name -match $pattern) {
-                                $blockers += "Tag [$($tag.name)] is protected by tag protection rule [$($rule.pattern)] on [$repoFullName] and cannot be updated."
+                                $blockers += "Tag [$($tag.name)] is protected by ruleset [$($ruleSet.name)] on [$repoFullName] and cannot be updated."
                                 break
                             }
                         }
@@ -225,7 +244,12 @@ function DownloadReleaseAssets {
     $downloaded = @()
 
     foreach ($asset in $assets) {
-        $path = Join-Path $targetDirectory $asset.name
+        $assetName = [string]$asset.name
+        if ([string]::IsNullOrWhiteSpace($assetName) -or [System.IO.Path]::GetFileName($assetName) -ne $assetName) {
+            throw "Release asset [$assetName] does not have a safe file name."
+        }
+
+        $path = Join-Path $targetDirectory $assetName
         Write-Debug "Downloading release asset [$($asset.name)]"
         Invoke-WebRequest -Uri $asset.downloadUrl -Headers $headers -OutFile $path -ErrorAction Stop
 
@@ -317,19 +341,20 @@ function SyncMirrorRefs {
 
     $failures = @()
     $previousLocation = Get-Location
+    $workingDirectoryPath = if ([System.IO.Path]::IsPathRooted($workingDirectory)) { $workingDirectory } else { Join-Path $previousLocation.Path $workingDirectory }
 
     try {
         if ($syncSettings.syncBranchPush -in @('try-merge', 'try-rebase')) {
             # merging or rebasing requires a working tree with the target repository checked out
-            git clone --quiet $targetCloneUrl $workingDirectory
+            InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $previousLocation.Path clone --quiet $targetCloneUrl $workingDirectoryPath
             if ($LASTEXITCODE -ne 0) {
                 return [PSCustomObject]@{ success = $false; failures = @("Failed to clone mirror repository [$mirror]") }
             }
-            Set-Location $workingDirectory
+            Set-Location $workingDirectoryPath
 
             git remote add upstream $upstreamCloneUrl
             $defaultBranch = (git symbolic-ref --short HEAD)
-            git fetch upstream $defaultBranch --tags --quiet
+            InvokeGitWithHost -gitHubHost $sourceHost -workingDirectory $workingDirectoryPath fetch upstream $defaultBranch --tags --quiet
 
             if ($syncSettings.syncBranches -ne 'none') {
                 if ($syncSettings.syncBranchPush -eq 'try-merge') {
@@ -342,7 +367,7 @@ function SyncMirrorRefs {
                         $failures += "Merge conflict while merging upstream into branch [$defaultBranch] on [$mirror]"
                     }
                     else {
-                        git push origin $defaultBranch
+                        InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push origin $defaultBranch
                         if ($LASTEXITCODE -ne 0) {
                             $failures += "Failed to push merged branch [$defaultBranch] to [$mirror]"
                         }
@@ -357,7 +382,7 @@ function SyncMirrorRefs {
                         $failures += "Rebase conflict while rebasing branch [$defaultBranch] on [$mirror] onto upstream"
                     }
                     else {
-                        git push origin $defaultBranch --force
+                        InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push origin $defaultBranch --force
                         if ($LASTEXITCODE -ne 0) {
                             $failures += "Failed to push rebased branch [$defaultBranch] to [$mirror]"
                         }
@@ -366,11 +391,11 @@ function SyncMirrorRefs {
             }
         }
         else {
-            git clone --bare --quiet $upstreamCloneUrl $workingDirectory
+            InvokeGitWithHost -gitHubHost $sourceHost -workingDirectory $previousLocation.Path clone --bare --quiet $upstreamCloneUrl $workingDirectoryPath
             if ($LASTEXITCODE -ne 0) {
                 return [PSCustomObject]@{ success = $false; failures = @("Failed to clone upstream [$upstream]") }
             }
-            Set-Location $workingDirectory
+            Set-Location $workingDirectoryPath
 
             git remote add target $targetCloneUrl
             $defaultBranch = (git symbolic-ref --short HEAD)
@@ -384,10 +409,10 @@ function SyncMirrorRefs {
                 'all' {
                     Write-Host "Pushing all branches to [$mirror]"
                     if ($useForce) {
-                        git push target "refs/heads/*:refs/heads/*" --force --prune
+                        InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push target "refs/heads/*:refs/heads/*" --force --prune
                     }
                     else {
-                        git push target "refs/heads/*:refs/heads/*" --prune
+                        InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push target "refs/heads/*:refs/heads/*" --prune
                     }
                     if ($LASTEXITCODE -ne 0) {
                         $failures += "Failed to push branches to [$mirror]"
@@ -396,10 +421,10 @@ function SyncMirrorRefs {
                 default {
                     Write-Host "Pushing default branch [$defaultBranch] to [$mirror]"
                     if ($useForce) {
-                        git push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch" --force
+                        InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch" --force
                     }
                     else {
-                        git push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch"
+                        InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push target "refs/heads/$defaultBranch`:refs/heads/$defaultBranch"
                     }
                     if ($LASTEXITCODE -ne 0) {
                         $failures += "Failed to push branch [$defaultBranch] to [$mirror]"
@@ -424,26 +449,21 @@ function SyncMirrorRefs {
 
             $useTagForce = ($syncSettings.syncTagPush -eq 'create-or-update') -or ($isFloating -and $syncSettings.syncFloatingTags)
             if ($useTagForce) {
-                $pushOutput = git push $targetRemote "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
+                $pushOutput = InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push $targetRemote "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
             }
             else {
-                $pushOutput = git push $targetRemote "refs/tags/$tag`:refs/tags/$tag" 2>&1
+                $pushOutput = InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectoryPath push $targetRemote "refs/tags/$tag`:refs/tags/$tag" 2>&1
             }
 
             if ($LASTEXITCODE -ne 0) {
                 $outputText = [string]$pushOutput
-                if ($outputText -match "already exists" -or $outputText -match "non-fast-forward" -or $outputText -match "immutable") {
-                    Write-Debug "Tag [$tag] was not updated on [$mirror]: $outputText"
-                }
-                else {
-                    $failures += "Failed to push tag [$tag] to [$mirror]: $outputText"
-                }
+                $failures += "Failed to push tag [$tag] to [$mirror]: $outputText"
             }
         }
     }
     finally {
         Set-Location $previousLocation
-        Remove-Item -Force -Recurse $workingDirectory -ErrorAction SilentlyContinue
+        Remove-Item -Force -Recurse $workingDirectoryPath -ErrorAction SilentlyContinue
     }
 
     foreach ($failure in $failures) {
@@ -554,15 +574,9 @@ function SyncReleases {
             $created++
         }
         catch {
-            if (TestImmutableReleaseError -errorRecord $_) {
-                Write-Warning "Tag [$($release.tagName)] on [$mirror] was used by an immutable release, skipping"
-                $skipped++
-            }
-            else {
-                $errorMsg = "Failed to create release [$($release.tagName)] on [$mirror]: $($_.Exception.Message)"
-                Write-Warning $errorMsg
-                $releaseFailures += $errorMsg
-            }
+            $errorMsg = "Failed to create release [$($release.tagName)] on [$mirror]: $($_.Exception.Message)"
+            Write-Warning $errorMsg
+            $releaseFailures += $errorMsg
         }
         finally {
             if ($assetDirectory -and (Test-Path $assetDirectory)) {

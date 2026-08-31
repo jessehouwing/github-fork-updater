@@ -109,7 +109,9 @@ Configure this with the following repository variables and secrets. When the wor
 | Setting | Kind | Purpose |
 |---|---|---|
 | `TARGET_SERVER_URL` | variable | The host that holds your repositories, for example `https://contoso.ghe.com`. Defaults to the server the workflow runs on |
+| `ALLOWED_TARGET_SERVER_URLS` | variable | Comma-separated allowlist of target hosts that may receive credentials. Defaults to the host running the workflow. Set this before targeting another GHE.com tenant or GHES host. |
 | `TARGET_ORG` | variable | The organization to scan. Defaults to the owner of this repository |
+| `ALLOW_AUTO_SYNC` | variable | Set to `true` to permit mirrors configured with `sync-mode: auto` to update without an approval issue. Defaults to disabled. |
 | `USE_GITHUB_APP` | variable | Set to `true` to mint the target token from a GitHub App |
 | `GH_AUTOMATION_ID` / `GH_AUTOMATION_PRIVATE_KEY` | secret | The GitHub App on the target host |
 | `USE_PUBLIC_GITHUB_APP` | variable | Set to `true` to mint the public GitHub token from a separate GitHub App |
@@ -119,6 +121,8 @@ Configure this with the following repository variables and secrets. When the wor
 | `PAT_GITHUB_PUBLIC` | secret | Fallback token for public GitHub. When unset, the target token is used for both |
 
 The GitHub App token is always requested against the API of the host the App lives on, and is scoped to the whole organization rather than to this repository, because the updater reads and writes other repositories.
+
+The target App token requests only the permissions required by its calling workflow. The update workflow requests `Contents: write`, `Issues: write`, `Actions: write`, and `Administration: read` (for ruleset preflight); the check and notification workflows request only their read access plus `Issues: write`. The public source App token requests `Contents: read` only. The actor who applies `update-fork` must have repository `admin` permission, which is checked before any App token is created.
 
 The source credentials are only used when the target is a different host. If `TARGET_SERVER_URL` resolves to public GitHub, the source and target are the same host, so no second token is minted and the target token is used for both. On a GHE.com or GitHub Enterprise Server target the workflow mints a separate token for public GitHub, falling back to `PAT_GITHUB_PUBLIC` and then to the target token when neither is configured.
 
@@ -139,7 +143,7 @@ Set these [custom properties](https://docs.github.com/en/organizations/managing-
 | Property | Values | Default | Description |
 |---|---|---|---|
 | `upstream-url` | a repository url | _unset_ | Overrides the `org_repo` naming convention |
-| `sync-mode` | `approve`, `auto` | `approve` | `approve` creates an issue and waits for the `update-fork` label, `auto` syncs immediately |
+| `sync-mode` | `approve`, `auto` | `approve` | `approve` creates an issue and waits for the `update-fork` label. `auto` additionally requires `ALLOW_AUTO_SYNC: true` on the updater repository. |
 | `sync-branches` | `default`, `all`, `none` | `default` | Which branches to push to the mirror |
 | `sync-branch-push` | `fast-forward-only`, `try-merge`, `try-rebase`, `use-force` | `fast-forward-only` | How branch changes are pushed or integrated |
 | `sync-tag-push` | `create-only`, `create-or-update` | `create-only` | Whether non-floating tags can be force updated |
@@ -148,7 +152,7 @@ Set these [custom properties](https://docs.github.com/en/organizations/managing-
 | `sync-release-assets` | `true`, `false` | `false` | Whether the release attachments are copied along with the release |
 | `verify-upstream-attestations` | `true`, `false` | `false` | Verify the upstream artifact attestations before recreating a release |
 
-Mirrors are synced with a bare clone of the upstream that is pushed to the mirror. Tags are pushed one by one, so a tag that is protected by an immutable release on the target does not block the rest of the sync.
+Mirrors are synced with a bare clone of the upstream that is pushed to the mirror. Before updating any existing tag, the updater checks effective repository and organization rulesets plus immutable releases. If those checks cannot run or a rule protects a tag, the update is stopped before any refs are changed.
 
 ## Immutable releases
 With `sync-releases: immutable` only releases that GitHub reports as immutable are recreated on the mirror, with `sync-releases: all` every published (non draft) release is recreated. Releases are created as published, which makes them immutable when [immutable releases](https://docs.github.com/en/actions/how-tos/create-and-publish-actions/using-immutable-releases-and-tags-to-manage-your-actions-releases) are enabled on the target.

@@ -13,9 +13,15 @@ function CallWebRequest {
 
     $Headers = GetHeaders -gitHubHost $gitHubHost
 
-    # allow callers to pass a path relative to the host's api url
-    if (-not $url.StartsWith("http")) {
+    # Allow callers to pass a path relative to the host's API URL.
+    if (-not [System.Uri]::IsWellFormedUriString($url, [System.UriKind]::Absolute)) {
         $url = "$($gitHubHost.ApiUrl)/$($url.TrimStart('/'))"
+    }
+
+    $requestUri = [System.Uri]$url
+    $apiUri = [System.Uri]$gitHubHost.ApiUrl
+    if ($requestUri.Scheme -ne $apiUri.Scheme -or $requestUri.Host -ne $apiUri.Host -or $requestUri.Port -ne $apiUri.Port) {
+        throw "Refusing to send an authenticated GitHub API request outside [$($apiUri.GetLeftPart([System.UriPartial]::Authority))]."
     }
 
     $info = $null
@@ -69,7 +75,7 @@ function CallWebRequest {
                     # }
 
                     # continue fetching next page
-                    $nextResult = CallWebRequest -url $nextUrl -gitHubHost $gitHubHost -verbToUse $verbToUse -body $body
+                    $nextResult = CallWebRequest -url $nextUrl -gitHubHost $gitHubHost -verbToUse $verbToUse -body $body -throwOnFailure:$throwOnFailure
                     $info += $nextResult
                 }
             }

@@ -33,7 +33,9 @@ jobs:
         app-id: ${{ secrets.GH_AUTOMATION_ID }}
         private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
         target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
-        target-issues-permission: write
+        target-permissions: |
+          contents: read
+          issues: write
         pat: ${{ secrets.PAT_GITHUB }}
 
     - uses: devops-actions/issue-comment-tag@v0.1.10

@@ -284,7 +284,8 @@ function ProcessReposWithUpdates {
     )
 
     # repos configured with sync-mode: auto are synced straight away, the rest go through an issue
-    $autoSync = @($reposWithUpdates | Where-Object { $null -ne $_ -and $_.syncSettings.syncMode -eq 'auto' -and -not $_.isFork })
+    $allowAutoSync = $env:ALLOW_AUTO_SYNC -eq 'true'
+    $autoSync = @($reposWithUpdates | Where-Object { $allowAutoSync -and $null -ne $_ -and $_.syncSettings.syncMode -eq 'auto' -and -not $_.isFork })
     $needsApproval = @($reposWithUpdates | Where-Object { $null -ne $_ -and ($_.syncSettings.syncMode -ne 'auto' -or $_.isFork) })
 
     foreach ($repo in $autoSync) {

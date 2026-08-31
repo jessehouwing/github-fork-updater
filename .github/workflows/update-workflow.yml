@@ -12,15 +12,44 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event.label.name == 'update-fork'
     permissions:
-      contents: write
-      actions: write
-      # needed to comment on, relabel and close the approval issue
-      issues: write
+      contents: read
     steps:
     - name: Harden the runner (Audit all outbound calls)
       uses: step-security/harden-runner@v2.20.0
       with:
         egress-policy: audit
+
+    - name: Require administrator approval
+      uses: actions-cool/check-user-permission@v2.4.0
+      with:
+        username: ${{ github.actor }}
+        require: admin
+        error-if-missing: true
+
+    - id: target-repository
+      name: Read target repository from approval issue
+      shell: pwsh
+      env:
+        ISSUE_BODY: ${{ github.event.issue.body }}
+        TARGET_ORG: ${{ vars.TARGET_ORG || github.repository_owner }}
+      run: |
+        $match = [regex]::Match($env:ISSUE_BODY, '(?s)<!--\s*fork-updater-approval:\s*(?<json>.*?)\s*-->')
+        if (-not $match.Success) {
+          throw "The issue body does not contain an approval snapshot."
+        }
+        try {
+          $repository = ($match.Groups['json'].Value | ConvertFrom-Json -ErrorAction Stop).target
+        }
+        catch {
+          throw "The approval snapshot does not contain valid JSON."
+        }
+        if ([string]::IsNullOrWhiteSpace($repository) -or $repository -notmatch '^[^/\s]+/[^/\s]+$') {
+          throw "The approval snapshot does not identify a valid target repository."
+        }
+        if ($repository -notmatch "^$([regex]::Escape($env:TARGET_ORG))/") {
+          throw "Target repository [$repository] is not in configured organization [$env:TARGET_ORG]."
+        }
+        "repository=$repository" >> $env:GITHUB_OUTPUT
 
     - uses: actions/checkout@v7.0.1
 
@@ -33,9 +62,14 @@ jobs:
         app-id: ${{ secrets.GH_AUTOMATION_ID }}
         private-key: ${{ secrets.GH_AUTOMATION_PRIVATE_KEY }}
         target-org: ${{ vars.TARGET_ORG || github.repository_owner }}
-        target-contents-permission: write
-        target-issues-permission: write
-        target-actions-permission: write
+        target-repositories: |
+          ${{ github.repository }}
+          ${{ steps.target-repository.outputs.repository }}
+        target-permissions: |
+          contents: write
+          issues: write
+          actions: write
+          administration: read
         pat: ${{ secrets.PAT_GITHUB }}
         use-public-github-app: ${{ vars.USE_PUBLIC_GITHUB_APP }}
         public-app-id: ${{ secrets.GH_PUBLIC_APP_ID }}

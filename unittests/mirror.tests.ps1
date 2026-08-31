@@ -103,11 +103,12 @@ Describe "Approval snapshots" {
     }
 
     It "round trips through the issue body" {
-        $snapshot = NewApprovalSnapshot -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $tags -releases @("v1.0.0")
+        $snapshot = NewApprovalSnapshot -target "mirrors/checkout" -upstream "actions/checkout" -defaultBranch "main" -headSha "abc123" -tags $tags -releases @("v1.0.0")
         $body = UpdateApprovalSnapshotInBody -issueBody "Some description" -snapshot $snapshot
 
         $parsed = ParseApprovalSnapshot -issueBody $body
 
+        $parsed.target | Should -Be "mirrors/checkout"
         $parsed.upstream | Should -Be "actions/checkout"
         $parsed.headSha | Should -Be "abc123"
         $parsed.tagsDigest | Should -Be $snapshot.tagsDigest
@@ -328,6 +329,12 @@ Describe "CreateGitHubHost" {
 
         (CreateGitHubHost -serverUrl "https://github.com").Token | Should -Be "actions-token"
     }
+
+    It "does not embed an access token in a clone URL" {
+        $gitHubHost = CreateGitHubHost -serverUrl "https://github.com" -token "secret-token"
+
+        GetCloneUrl -gitHubHost $gitHubHost -repoFullName "actions/checkout" | Should -Be "https://github.com/actions/checkout.git"
+    }
 }
 
 Describe "ResolveGitHubHostUrls" {
@@ -358,6 +365,14 @@ Describe "ResolveGitHubHostUrls" {
         $result = ResolveGitHubHostUrls -serverUrl "https://github.contoso.com"
         $result.ApiUrl | Should -Be "https://github.contoso.com/api/v3"
         $result.GraphQlUrl | Should -Be "https://github.contoso.com/api/graphql"
+    }
+
+    It "rejects unsafe GitHub server URLs" -ForEach @(
+        @{ url = "http://github.contoso.com" }
+        @{ url = "https://user:pass@github.contoso.com" }
+        @{ url = "https://127.0.0.1" }
+    ) {
+        { ResolveGitHubHostUrls -serverUrl $url } | Should -Throw
     }
 }
 
@@ -551,11 +566,61 @@ Describe "TestCanApplyUpdate" {
         $mockHost = [PSCustomObject]@{ ServerUrl = "https://github.com"; ApiUrl = "https://api.github.com" }
 
         Mock TestReleaseImmutability { return $false }
-        Mock CallWebRequest { return @([PSCustomObject]@{ id = 1; pattern = "v1.*" }) }
+        Mock CallWebRequest { return @([PSCustomObject]@{
+                    name       = "protect-version-tags"
+                    enforcement = "active"
+                    conditions = [PSCustomObject]@{
+                        ref_name = [PSCustomObject]@{ include = @("refs/tags/v1.*") }
+                    }
+                }) }
 
         $result = TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings -targetHost $mockHost -repoFullName "org/repo"
         $result.canApply | Should -BeFalse
-        $result.blockers[0] | Should -BeLike "*v1.0.0*tag protection rule*v1.*"
+        $result.blockers[0] | Should -BeLike "*v1.0.0*ruleset*protect-version-tags*"
+    }
+
+    It "checks every changed tag against rulesets, not only the displayed tags" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch   = "main"
+            branchAction    = "fast-forward"
+            tagList         = @()
+            forceUpdateTags = @("v1.0.0", "v2.0.0")
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-tag-push' = 'create-or-update' } -repoFullName "org/repo"
+        $mockHost = [PSCustomObject]@{ ServerUrl = "https://github.com"; ApiUrl = "https://api.github.com" }
+
+        Mock TestReleaseImmutability { return $false }
+        Mock CallWebRequest { return @([PSCustomObject]@{
+                    name        = "protect-v2"
+                    enforcement = "active"
+                    conditions  = [PSCustomObject]@{ ref_name = [PSCustomObject]@{ include = @("refs/tags/v2.*") } }
+                }) }
+
+        (TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings -targetHost $mockHost -repoFullName "org/repo").canApply | Should -BeFalse
+    }
+
+    It "blocks existing tag updates when it cannot inspect rulesets" {
+        $snapshot = [PSCustomObject]@{
+            defaultBranch = "main"
+            branchAction  = "fast-forward"
+            tagList       = @([PSCustomObject]@{ name = "v1.0.0"; action = "force push required" })
+        }
+        $settings = GetSyncSettings -properties @{ 'sync-tag-push' = 'create-or-update' } -repoFullName "org/repo"
+        $mockHost = [PSCustomObject]@{ ServerUrl = "https://github.com"; ApiUrl = "https://api.github.com" }
+
+        Mock TestReleaseImmutability { return $false }
+        Mock CallWebRequest { throw "forbidden" }
+
+        (TestCanApplyUpdate -snapshot $snapshot -syncSettings $settings -targetHost $mockHost -repoFullName "org/repo").canApply | Should -BeFalse
+    }
+}
+
+Describe "DownloadReleaseAssets" {
+    It "rejects release asset names that escape the temporary directory" {
+        $gitHubHost = [PSCustomObject]@{ Token = "token" }
+        $asset = [PSCustomObject]@{ name = "../outside"; downloadUrl = "https://example.com/asset" }
+
+        { DownloadReleaseAssets -assets @($asset) -gitHubHost $gitHubHost -targetDirectory $TestDrive } | Should -Throw
     }
 }
 

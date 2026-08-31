@@ -15,7 +15,22 @@ function ResolveGitHubHostUrls {
     $serverUrl = $serverUrl -replace '/api/v3$', ''
     $serverUrl = $serverUrl -replace '/api/graphql$', ''
 
-    $uri = [System.Uri]$serverUrl
+    try {
+        $uri = [System.Uri]$serverUrl
+    }
+    catch {
+        throw "GitHub server URL [$serverUrl] is not a valid absolute HTTPS URL."
+    }
+
+    if (-not $uri.IsAbsoluteUri -or $uri.Scheme -ne 'https' -or -not $uri.IsDefaultPort -or $uri.UserInfo -or $uri.Query -or $uri.Fragment) {
+        throw "GitHub server URL [$serverUrl] must use HTTPS without credentials, query, fragment, or a non-default port."
+    }
+
+    $ipAddress = $null
+    if ($uri.Host -eq 'localhost' -or [System.Net.IPAddress]::TryParse($uri.Host, [ref]$ipAddress)) {
+        throw "GitHub server URL [$serverUrl] must use a DNS hostname, not localhost or an IP address."
+    }
+
     $hostName = $uri.Host
 
     if ($hostName -eq "api.github.com" -or $hostName -eq "github.com" -or $hostName -eq "www.github.com") {
@@ -100,9 +115,25 @@ function GetCloneUrl {
         [string] $repoFullName
     )
 
-    if ($gitHubHost.HasToken) {
-        return "$($gitHubHost.ServerUrl -replace '^https://', "https://xx:$($gitHubHost.Token)@")/$repoFullName.git"
+    return "$($gitHubHost.ServerUrl)/$repoFullName.git"
+}
+
+function InvokeGitWithHost {
+    param (
+        [object] $gitHubHost,
+        [string] $workingDirectory,
+        [Parameter(ValueFromRemainingArguments = $true)]
+        [string[]] $arguments
+    )
+
+    $gitArguments = @()
+    if (-not [string]::IsNullOrWhiteSpace($workingDirectory)) {
+        $gitArguments += @('-C', $workingDirectory)
     }
 
-    return "$($gitHubHost.ServerUrl)/$repoFullName.git"
+    if ($gitHubHost.HasToken) {
+        $gitArguments += @('-c', "http.$($gitHubHost.ServerUrl)/.extraHeader=Authorization: Bearer $($gitHubHost.Token)")
+    }
+
+    & git @gitArguments @arguments
 }

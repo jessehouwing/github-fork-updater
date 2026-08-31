@@ -38,10 +38,16 @@ workflows:
         - 'ossf/scorecard-action@v2.4.4'
         - 'step-security/harden-runner@v2.20.0'
     '.github/workflows/update-workflow.yml':
+        - 'actions-cool/check-user-permission@v2.4.0'
         - 'actions/checkout@v7.0.1'
         - 'actions/create-github-app-token@v3.2.0'
         - 'step-security/harden-runner@v2.20.0'
 dependencies:
+    'actions-cool/check-user-permission@v2.4.0':
+        ref: 'v2.4.0'
+        commit: 'sha1-c21884f3dda18dafc2f8b402fe807ccc9ec1aa5e'
+        owner_id: 73879334
+        repo_id: 344485868
     'actions/checkout@v7.0.1':
         ref: 'v7.0.1'
         commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'

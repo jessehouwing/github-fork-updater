@@ -29,6 +29,7 @@ function GetContentDigest {
 
 function NewApprovalSnapshot {
     param (
+        [string] $target,
         [string] $upstream,
         [string] $defaultBranch,
         [string] $headSha,
@@ -55,6 +56,7 @@ function NewApprovalSnapshot {
 
     # everything except the digests, counts and shas is only used to render the issue, it is never compared
     return [PSCustomObject]@{
+        target             = $target
         upstream           = $upstream
         defaultBranch      = $defaultBranch
         headSha            = $headSha
@@ -66,6 +68,7 @@ function NewApprovalSnapshot {
         tagCount           = $tagEntries.Count
         tagChangedCount    = $changedTags.Count
         tagList            = @($changedTags | Select-Object -First $script:MaxListedRefs | ForEach-Object { [PSCustomObject]@{ name = $_.name; action = $_.action } })
+        forceUpdateTags    = @($changedTags | Where-Object { $_.action -eq 'force push required' } | ForEach-Object { $_.name })
         tagsDigest         = GetContentDigest -values $tagEntries
         releaseTags        = @($releaseItems | ForEach-Object { $_.name })
         releaseList        = @($releaseItems | Select-Object -First $script:MaxListedRefs)

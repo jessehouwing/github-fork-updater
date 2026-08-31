@@ -44,23 +44,25 @@ $sourceDirectory = "source"
 function UpdateFork {
     param (
         [string] $fork,
-        [object] $gitHubHost,
+        [object] $sourceHost,
+        [object] $targetHost,
         [object] $syncSettings
     )
 
-    $forkUrl = GetForkCloneUrl -fork $fork -gitHubHost $gitHubHost
+    $forkUrl = GetForkCloneUrl -fork $fork -gitHubHost $targetHost
 
     # set user settings
     git config --global user.email "noreply@githubupdater.com"
     git config --global user.name "GitHub Fork Updater"
 
     # create new temp dir to hold the fork
-    New-Item -ItemType Directory $sourceDirectory
-    Set-Location $sourceDirectory
+    $workingDirectory = Join-Path (Get-Location) $sourceDirectory
+    New-Item -ItemType Directory $workingDirectory
+    Set-Location $workingDirectory
     Write-Host "Clone fork from url [$forkUrl]"
-    git clone $forkUrl .
+    InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory clone $forkUrl .
 
-    $parent = GetParentInfo -fork $fork -gitHubHost $gitHubHost
+    $parent = GetParentInfo -fork $fork -gitHubHost $targetHost
     Write-Host "Found forks parent with url [$($parent.parentUrl)]"
 
     # add remote to the parent
@@ -68,7 +70,7 @@ function UpdateFork {
 
     # fetch the changes from the parent
     Write-Host "Fetching changes from parent repo"
-    git fetch github $parent.parentDefaultBranch --tags
+    InvokeGitWithHost -gitHubHost $sourceHost -workingDirectory $workingDirectory fetch github $parent.parentDefaultBranch --tags
 
     # make sure you are on the right branch
     Write-Host "Pulling all changes from the parent on branch [$($parent.parentDefaultBranch)]"
@@ -83,7 +85,7 @@ function UpdateFork {
                 Write-Host "Cannot fast-forward branch [$($parent.parentDefaultBranch)]"
                 return 1
             }
-            git push origin $parent.parentDefaultBranch
+            InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory push origin $parent.parentDefaultBranch
             if ($LASTEXITCODE -ne 0) { return 1 }
         }
         'try-merge' {
@@ -95,7 +97,7 @@ function UpdateFork {
                 git merge --abort
                 return 1
             }
-            git push origin $parent.parentDefaultBranch
+            InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory push origin $parent.parentDefaultBranch
             if ($LASTEXITCODE -ne 0) { return 1 }
         }
         'try-rebase' {
@@ -106,13 +108,13 @@ function UpdateFork {
                 git rebase --abort
                 return 1
             }
-            git push origin $parent.parentDefaultBranch --force
+            InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory push origin $parent.parentDefaultBranch --force
             if ($LASTEXITCODE -ne 0) { return 1 }
         }
         'use-force' {
             Write-Host "Resetting branch to parent commit (force)"
             git reset --hard github/$($parent.parentDefaultBranch)
-            git push origin $parent.parentDefaultBranch --force
+            InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory push origin $parent.parentDefaultBranch --force
             if ($LASTEXITCODE -ne 0) { return 1 }
         }
     }
@@ -130,10 +132,10 @@ function UpdateFork {
         }
         $useForce = ($syncSettings.syncTagPush -eq 'create-or-update') -or ($isFloating -and $syncSettings.syncFloatingTags)
         if ($useForce) {
-            $pushOutput = git push origin "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
+            $pushOutput = InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory push origin "refs/tags/$tag`:refs/tags/$tag" --force 2>&1
         }
         else {
-            $pushOutput = git push origin "refs/tags/$tag`:refs/tags/$tag" 2>&1
+            $pushOutput = InvokeGitWithHost -gitHubHost $targetHost -workingDirectory $workingDirectory push origin "refs/tags/$tag`:refs/tags/$tag" 2>&1
         }
 
         if ($LASTEXITCODE -ne 0) {
@@ -166,7 +168,14 @@ function Main {
     $workflowRunUrl = "$($env:GITHUB_SERVER_URL)/$($env:GITHUB_REPOSITORY)/actions/runs/$($env:GITHUB_RUN_ID)"
     Write-Host "Found workflowRunUrl: [$workflowRunUrl]"
 
-    $fork = ParseIssueTitle -issueTitle $issueTitle
+    $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
+    $approved = ParseApprovalSnapshot -issueBody $issue.body
+    $fork = $approved.target
+    if ([string]::IsNullOrWhiteSpace($fork) -or $fork -notmatch '^[^/\s]+/[^/\s]+$') {
+        Write-Host "The approval issue does not contain a valid target repository, halting execution"
+        AddCommentToIssue -number $issueId -message ":warning: The approval issue does not contain a valid target repository. Run the update check again to create a new approval issue." -repoName $issuesRepository -gitHubHost $targetHost
+        return 1
+    }
 
     $repo = GetRepoInfo -gitHubHost $targetHost -repoFullName $fork
     if ($null -eq $repo) {
@@ -202,13 +211,11 @@ function Main {
     $baseRef = $baseCommit.sha
     $headRef = if ($repo.fork) { "$($upstreamHost.UserName):$($branchCommit.sha)" } else { $branchCommit.sha }
     $compareStatus = GetCompareStatus -gitHubHost $targetHost -repoFullName $compareRepo -baseRef $baseRef -headRef $headRef
-    $branchAction = if ($compareStatus) { MapCompareStatus -status $compareStatus.status } else { 'unknown' }
+    $branchAction = if ($compareStatus) { MapCompareStatus -status $compareStatus } else { 'unknown' }
 
     # only apply what was actually reviewed: re-check the upstream against the versions recorded on the issue
     $currentSnapshot = CollectApprovalSnapshot -upstreamHost $upstreamHost -targetHost $targetHost -repoFullName $repo.full_name -upstream $upstream -defaultBranch $defaultBranch -headSha $branchCommit.sha -baseSha $baseCommit.sha -compareUrl $compareUrl -branchAction $branchAction -syncSettings $syncSettings
 
-    $issue = GetIssue -gitHubHost $targetHost -repoFullName $issuesRepository -number $issueId
-    $approved = ParseApprovalSnapshot -issueBody $issue.body
     $comparison = CompareApprovalSnapshots -approved $approved -current $currentSnapshot
 
     if ($comparison.changed) {
@@ -236,7 +243,7 @@ function Main {
     AddCommentToIssue -number $issueId -message "Updating the fork with the approved changes from the parent repository through [update-workflow]($workflowRunUrl)." -repoName $issuesRepository -gitHubHost $targetHost
 
     if ($repo.fork) {
-        $forkResult = UpdateFork -fork $fork -gitHubHost $targetHost -syncSettings $syncSettings
+        $forkResult = UpdateFork -fork $fork -sourceHost $upstreamHost -targetHost $targetHost -syncSettings $syncSettings
         if ($forkResult -eq 1) {
             Write-Host "Error with the update of the fork, halting execution"
             AddCommentToIssue -number $issueId -message ":warning: Error updating the fork, aborting the update" -repoName $issuesRepository -gitHubHost $targetHost
